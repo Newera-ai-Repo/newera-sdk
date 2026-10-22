@@ -144,9 +144,10 @@ The tests run the SDK against a fake WebSocket server; no network, no key.
 ## Releasing
 
 1. Bump `version` in `pyproject.toml` (and `__version__` in `src/newera/__init__.py`).
-2. Create a GitHub Release tagged `vX.Y.Z` (for example `v0.1.1`) from `main`.
-3. The `publish` workflow runs the tests, builds the package and uploads it to PyPI
-   through trusted publishing. No API token is stored in the repository.
+2. Push to `main`. The `publish` workflow runs the tests. If that version is not yet on
+   PyPI, it builds the package, uploads it through trusted publishing, and creates the
+   `vX.Y.Z` tag and a GitHub Release. No API token is stored in the repository.
+3. A push with an unchanged version only runs the tests.
 
 ## License
 

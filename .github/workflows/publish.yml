@@ -1,37 +1,61 @@
 name: publish
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e '.[test]' build
+      - run: pip install -e '.[test]'
       - run: pytest -q
-      - run: python -m build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
+
+  check:
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      new: ${{ steps.version.outputs.new }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read version and check PyPI
+        id: version
+        run: |
+          VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/newera-sdk/${VERSION}/json")
+          if [ "$CODE" = "404" ]; then NEW=true; elif [ "$CODE" = "200" ]; then NEW=false; else echo "Unexpected PyPI status $CODE"; exit 1; fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "new=${NEW}" >> "$GITHUB_OUTPUT"
+          echo "Version ${VERSION} new on PyPI: ${NEW}"
 
   publish:
-    needs: build
+    needs: check
+    if: needs.check.outputs.new == 'true'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
+      contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          name: dist
-          path: dist/
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
       - uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Tag and create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ needs.check.outputs.version }}" dist/* \
+            --title "v${{ needs.check.outputs.version }}" \
+            --generate-notes
