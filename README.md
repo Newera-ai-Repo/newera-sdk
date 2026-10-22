@@ -103,7 +103,7 @@ and treat what comes back from a tool as data, never as instructions.
 
 ```python
 async with agent.connect() as call:
-    await call.send_audio(pcm16_bytes)      # 16-bit mono, 16 kHz by default; real time, 20-100 ms chunks
+    await call.send_audio(pcm16_bytes)      # 16-bit mono, 24 kHz by default (16 kHz: session={"newera": {"input_audio_sample_rate": 16000}}); real time, 20-100 ms chunks
     await call.send_text("hello")           # a typed turn (add respond=False to wait)
     await call.say("Welcome to the clinic") # the assistant speaks first
     async for event in call:                # every server event

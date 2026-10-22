@@ -207,7 +207,8 @@ class Call:
     # --------------------------------------------------------------------- send
 
     async def send_audio(self, pcm: bytes) -> None:
-        """16-bit mono PCM at the session's input rate (16 kHz by default)."""
+        """16-bit mono PCM at the session's input rate (24 kHz by default, as in OpenAI's API;
+        `VoiceAgent(session={"newera": {"input_audio_sample_rate": 16000}})` for 16 kHz)."""
         await self._send({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode()})
 
     async def send_text(self, text: str, *, respond: bool = True) -> None:
@@ -220,8 +221,13 @@ class Call:
         """Make the assistant say something (a greeting, for example)."""
         await self._send({"type": "response.create", "response": {"instructions": instructions}})
 
-    async def commit(self) -> None:
+    async def commit(self, *, respond: bool = True) -> None:
+        """Manual turns (`turn_detection: null`): the audio sent so far is the caller's turn. As in
+        OpenAI's API a commit alone starts no reply, so this also sends `response.create`;
+        `respond=False` only adds the audio to the conversation."""
         await self._send({"type": "input_audio_buffer.commit"})
+        if respond:
+            await self._send({"type": "response.create"})
 
     async def cancel(self) -> None:
         await self._send({"type": "response.cancel"})
