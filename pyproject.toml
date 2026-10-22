@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "newera-sdk"
+version = "0.1.0"
+description = "Newera speech-to-speech SDK: voice calls where Python functions are the tools."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Newera" }]
+keywords = ["voice", "speech-to-speech", "arabic", "realtime", "tool-calling", "agents"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Sound/Audio :: Speech",
+  "Intended Audience :: Developers",
+]
+dependencies = ["websockets>=14"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/Newera-ai-Repo/newera-sdk"
+Repository = "https://github.com/Newera-ai-Repo/newera-sdk"
+Issues = "https://github.com/Newera-ai-Repo/newera-sdk/issues"
+Changelog = "https://github.com/Newera-ai-Repo/newera-sdk/releases"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+newera = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
