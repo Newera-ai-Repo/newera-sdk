@@ -96,8 +96,12 @@ class Reply:
 class VoiceAgent:
     def __init__(self, *, api_key: str | None = None, instructions: str | None = None, voice: str = "male",
                  url: str = DEFAULT_URL, tool_choice: Any = "auto", max_tool_steps: int | None = None,
-                 auto_continue: bool = True, session: dict | None = None, headers: dict | None = None):
+                 auto_continue: bool = True, session: dict | None = None, headers: dict | None = None,
+                 llm: str | None = None):
         self.api_key, self.instructions, self.voice, self.url = api_key, instructions, voice, url
+        # The model behind the call: "newera-chat-large" (the server's default) or "newera-chat-small".
+        # Sent as session.newera.llm; the server validates it.
+        self.llm = llm
         self.tool_choice, self.max_tool_steps, self.auto_continue = tool_choice, max_tool_steps, auto_continue
         self.session = session or {}
         self.headers = headers or {}
@@ -132,6 +136,8 @@ class VoiceAgent:
             newera["max_tool_steps"] = self.max_tool_steps
         if not self.auto_continue:
             newera["tool_auto_continue"] = False
+        if self.llm is not None:
+            newera["llm"] = self.llm
         if newera:
             s["newera"] = newera
         return {"type": "session.update", "session": s}

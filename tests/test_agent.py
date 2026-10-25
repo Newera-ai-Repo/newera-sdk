@@ -114,6 +114,18 @@ def test_session_update_declares_tools_and_settings():
     run(go())
 
 
+def test_llm_is_sent_under_newera_only_when_chosen():
+    async def go():
+        async with FakeServer() as srv:
+            async with make_agent(srv.url, llm="newera-chat-small", max_tool_steps=4).connect():
+                pass
+            assert srv.updates[0]["newera"] == {"max_tool_steps": 4, "llm": "newera-chat-small"}
+            async with make_agent(srv.url).connect():
+                pass
+            assert "newera" not in srv.updates[1]
+    run(go())
+
+
 def test_tools_run_and_results_go_back():
     async def go():
         async with FakeServer(calls=[("get_slots", {"date": "2026-10-24"}), ("book", {"name": "Ahmed"}),

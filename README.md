@@ -124,7 +124,9 @@ scripts and tests.
 
 `VoiceAgent(...)` takes `api_key`, `instructions`, `voice`, `tool_choice`
 (`"auto"`, `"none"`, `"required"`, or `{"type": "function", "name": ...}`),
-`max_tool_steps`, `auto_continue`, `session` (extra `session.update` fields such as
+`max_tool_steps`, `auto_continue`, `llm` (`"newera-chat-large"`, the default, or
+`"newera-chat-small"`: the fastest first word and the lowest cost),
+`session` (extra `session.update` fields such as
 `{"tts": {"quality": "studio"}}`), `url` and `headers`.
 
 `auto_continue=False` is the OpenAI-style flow: after your outputs the SDK sends
