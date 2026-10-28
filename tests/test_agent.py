@@ -257,3 +257,22 @@ def test_audio_and_text_helpers_send_the_right_events():
             assert srv.received[1]["audio"] == "AQACAA=="
             assert srv.received[3]["response"] == {"instructions": "welcome"}
     run(go())
+
+
+def test_voice_quality_is_sent_under_newera_when_set():
+    agent = VoiceAgent(voice_quality="instant", max_tool_steps=3)
+    assert agent.session_update()["session"]["newera"] == {"max_tool_steps": 3, "voice_quality": "instant"}
+    assert "newera" not in VoiceAgent().session_update()["session"]
+
+
+@pytest.mark.parametrize("value", ["instant", "balanced", "studio"])
+def test_voice_quality_accepts_the_three_values(value):
+    assert VoiceAgent(voice_quality=value).voice_quality == value
+
+
+def test_voice_quality_rejects_anything_else():
+    with pytest.raises(ValueError) as info:
+        VoiceAgent(voice_quality="fast")
+    assert "instant" in str(info.value) and "'fast'" in str(info.value)
+    with pytest.raises(ValueError):
+        VoiceAgent(voice_quality="")

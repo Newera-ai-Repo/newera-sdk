@@ -131,6 +131,23 @@ billed as 124 seconds, which is 0.41 SAR on `newera-s2s` or 0.21 SAR on
 
 Each API key can run up to 5 calls at the same time.
 
+## Voice quality
+
+`voice_quality` sets how the assistant sounds and how quickly it starts each reply.
+It can also be changed during a call, and applies from the next reply.
+
+| value | use it for |
+|---|---|
+| `instant` | the fastest start to every reply, for snappy back-and-forth: quick confirmations, short questions and answers, menu-style flows, high-volume reminder and notification calls |
+| `balanced` | a natural voice with a quick start; the everyday choice for most support, booking and service calls |
+| `studio` (default) | the most natural, polished voice, for conversations where how you sound matters most: sales, concierge and premium service, longer explanations |
+
+```python
+agent = VoiceAgent(api_key="nwc_live_...", voice_quality="balanced")
+```
+
+An unknown value raises `ValueError` before anything connects.
+
 ## The call
 
 ```python
@@ -157,7 +174,8 @@ scripts and tests.
 `VoiceAgent(...)` takes `api_key`, `instructions`, `voice`, `model` (see
 [Models](#models)), `tool_choice` (`"auto"`, `"none"`, `"required"`, or
 `{"type": "function", "name": ...}`), `max_tool_steps`, `auto_continue`,
-`session` (extra `session.update` fields such as `{"tts": {"quality": "studio"}}`),
+`voice_quality` (`"studio"` (default), `"balanced"` or `"instant"`, see [Voice quality](#voice-quality)),
+`session` (extra `session.update` fields),
 `url` and `headers`.
 
 `auto_continue=False` is the OpenAI-style flow: after your outputs the SDK sends

@@ -43,6 +43,7 @@ from .schema import coerce_arguments, function_schema
 DEFAULT_URL = "wss://api.newera.ai/v1/realtime"
 MODELS = ("newera-s2s", "newera-s2s-mini")
 DEFAULT_MODEL = "newera-s2s"
+VOICE_QUALITIES = ("instant", "balanced", "studio")
 MAX_OUTPUT_CHARS = 30000
 
 
@@ -103,9 +104,14 @@ class VoiceAgent:
     def __init__(self, *, api_key: str | None = None, instructions: str | None = None, voice: str = "male",
                  url: str = DEFAULT_URL, tool_choice: Any = "auto", max_tool_steps: int | None = None,
                  auto_continue: bool = True, session: dict | None = None, headers: dict | None = None,
-                 model: str = DEFAULT_MODEL):
+                 model: str = DEFAULT_MODEL, voice_quality: str | None = None):
         if model not in MODELS:
             raise ValueError("model must be one of %s, not %r" % (", ".join(MODELS), model))
+        if voice_quality is not None and voice_quality not in VOICE_QUALITIES:
+            raise ValueError("voice_quality must be one of %s, not %r"
+                             % (", ".join(VOICE_QUALITIES), voice_quality))
+        # "instant", "balanced" or "studio" (the server's default when unset).
+        self.voice_quality = voice_quality
         self.api_key, self.instructions, self.voice, self.url = api_key, instructions, voice, url
         # "newera-s2s" (default) or "newera-s2s-mini". Sent in the WebSocket URL as ?model=.
         self.model = model
@@ -139,6 +145,8 @@ class VoiceAgent:
             s["tools"] = [t.definition() for t in self.tools.values()]
             s["tool_choice"] = self.tool_choice
         newera = dict(s.get("newera") or {})
+        if self.voice_quality is not None:
+            newera["voice_quality"] = self.voice_quality
         if self.max_tool_steps is not None:
             newera["max_tool_steps"] = self.max_tool_steps
         if not self.auto_continue:
