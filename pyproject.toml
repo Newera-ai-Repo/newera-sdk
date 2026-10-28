@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "newera-sdk"
-version = "0.1.2"
+version = "0.2.0"
 description = "Newera speech-to-speech SDK: voice calls where Python functions are the tools."
 readme = "README.md"
 requires-python = ">=3.9"

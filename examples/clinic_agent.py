@@ -38,6 +38,7 @@ class Department(str, Enum):
 
 agent = VoiceAgent(
     api_key=os.environ.get("NEWERA_API_KEY"),
+    model="newera-s2s-mini",                                     # appointment booking: fast, efficient
     voice="male",
     session={"newera": {"input_audio_sample_rate": 16000}},      # the example sends a 16 kHz WAV
     instructions=(

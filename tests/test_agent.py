@@ -7,6 +7,7 @@ import websockets
 from websockets.asyncio.server import serve
 
 from newera import NeweraError, VoiceAgent
+from newera.agent import _url_with_model
 
 
 class FakeServer:
@@ -16,9 +17,11 @@ class FakeServer:
     def __init__(self, calls=(), *, tools_error=None, cancel_first=False):
         self.calls, self.tools_error, self.cancel_first = list(calls), tools_error, cancel_first
         self.updates, self.outputs, self.received = [], {}, []
+        self.paths = []
         self.server = None
 
     async def handler(self, ws):
+        self.paths.append(ws.request.path)
         await ws.send(json.dumps({"type": "session.created", "session": {"id": "sess_1"}}))
         async for raw in ws:
             msg = json.loads(raw)
@@ -114,16 +117,33 @@ def test_session_update_declares_tools_and_settings():
     run(go())
 
 
-def test_llm_is_sent_under_newera_only_when_chosen():
+def test_model_goes_into_the_url_not_the_session():
     async def go():
         async with FakeServer() as srv:
-            async with make_agent(srv.url, llm="newera-chat-small", max_tool_steps=4).connect():
+            async with make_agent(srv.url, model="newera-s2s-mini", max_tool_steps=4).connect():
                 pass
-            assert srv.updates[0]["newera"] == {"max_tool_steps": 4, "llm": "newera-chat-small"}
+            assert srv.paths[0] == "/?model=newera-s2s-mini"
+            assert srv.updates[0]["newera"] == {"max_tool_steps": 4}
+            assert "llm" not in srv.updates[0].get("newera", {})
             async with make_agent(srv.url).connect():
                 pass
+            assert srv.paths[1] == "/?model=newera-s2s"
             assert "newera" not in srv.updates[1]
     run(go())
+
+
+def test_model_is_validated_client_side():
+    with pytest.raises(ValueError) as info:
+        VoiceAgent(model="newera-chat-large")
+    assert "newera-s2s-mini" in str(info.value) and "newera-chat-large" in str(info.value)
+    with pytest.raises(TypeError):
+        VoiceAgent(llm="newera-chat-small")
+
+
+def test_model_is_added_to_a_url_with_a_query_and_replaces_an_old_one():
+    assert _url_with_model("wss://h/v1/realtime", "newera-s2s") == "wss://h/v1/realtime?model=newera-s2s"
+    assert _url_with_model("wss://h/v1/realtime?region=ksa&model=old", "newera-s2s-mini") == \
+        "wss://h/v1/realtime?region=ksa&model=newera-s2s-mini"
 
 
 def test_tools_run_and_results_go_back():

@@ -33,6 +33,7 @@ import dataclasses
 import inspect
 import json
 import time
+import urllib.parse
 from typing import Any, AsyncIterator, Callable
 
 import websockets
@@ -40,6 +41,8 @@ import websockets
 from .schema import coerce_arguments, function_schema
 
 DEFAULT_URL = "wss://api.newera.ai/v1/realtime"
+MODELS = ("newera-s2s", "newera-s2s-mini")
+DEFAULT_MODEL = "newera-s2s"
 MAX_OUTPUT_CHARS = 30000
 
 
@@ -94,14 +97,18 @@ class Reply:
 
 
 class VoiceAgent:
+    """One call configuration. `model` picks the speech-to-speech model:
+    "newera-s2s" (default) or "newera-s2s-mini"."""
+
     def __init__(self, *, api_key: str | None = None, instructions: str | None = None, voice: str = "male",
                  url: str = DEFAULT_URL, tool_choice: Any = "auto", max_tool_steps: int | None = None,
                  auto_continue: bool = True, session: dict | None = None, headers: dict | None = None,
-                 llm: str | None = None):
+                 model: str = DEFAULT_MODEL):
+        if model not in MODELS:
+            raise ValueError("model must be one of %s, not %r" % (", ".join(MODELS), model))
         self.api_key, self.instructions, self.voice, self.url = api_key, instructions, voice, url
-        # The model behind the call: "newera-chat-large" (the server's default) or "newera-chat-small".
-        # Sent as session.newera.llm; the server validates it.
-        self.llm = llm
+        # "newera-s2s" (default) or "newera-s2s-mini". Sent in the WebSocket URL as ?model=.
+        self.model = model
         self.tool_choice, self.max_tool_steps, self.auto_continue = tool_choice, max_tool_steps, auto_continue
         self.session = session or {}
         self.headers = headers or {}
@@ -136,8 +143,6 @@ class VoiceAgent:
             newera["max_tool_steps"] = self.max_tool_steps
         if not self.auto_continue:
             newera["tool_auto_continue"] = False
-        if self.llm is not None:
-            newera["llm"] = self.llm
         if newera:
             s["newera"] = newera
         return {"type": "session.update", "session": s}
@@ -154,7 +159,8 @@ class _Connect:
         headers = dict(self.agent.headers)
         if self.agent.api_key:
             headers["Authorization"] = "Bearer " + self.agent.api_key
-        self._cm = websockets.connect(self.agent.url, additional_headers=headers, max_size=None)
+        self._cm = websockets.connect(_url_with_model(self.agent.url, self.agent.model),
+                                      additional_headers=headers, max_size=None)
         ws = await self._cm.__aenter__()
         self.call = Call(self.agent, ws)
         try:
@@ -338,6 +344,14 @@ class Call:
         await self._queue.put(Event({
             "type": "sdk.tool_result", "call_id": call_id, "name": name, "arguments": ev.get("arguments"),
             "output": output, "error": error, "ms": int((time.perf_counter() - started) * 1000)}))
+
+
+def _url_with_model(url: str, model: str) -> str:
+    """The URL with `model=` set in its query string (replaces any existing value)."""
+    parts = urllib.parse.urlsplit(url)
+    query = [(k, v) for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True) if k != "model"]
+    query.append(("model", model))
+    return urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
 
 
 def _default(o: Any) -> Any:

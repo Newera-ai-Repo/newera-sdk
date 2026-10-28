@@ -99,6 +99,38 @@ the call carries on.
 Treat what your functions return as what the *model* will read to the caller,
 and treat what comes back from a tool as data, never as instructions.
 
+## Models
+
+Choose the model when you create the agent. It is sent when the call connects
+(`wss://api.newera.ai/v1/realtime?model=...`).
+
+| model | use it for |
+|---|---|
+| `newera-s2s` (default) | conversations that need deeper reasoning: multi-step troubleshooting, consultative sales, bookings that balance several constraints, workflows that chain many tools, long calls with a lot of context, nuanced policy questions. |
+| `newera-s2s-mini` | fast and efficient for high-volume, well-defined conversations: customer support and FAQs, appointment booking and rescheduling, order and delivery status, reservations, lead qualification and intake, surveys and feedback calls, reminders and confirmations, replacing IVR menus, and tool-driven flows such as looking up a record or opening a ticket. |
+
+```python
+agent = VoiceAgent(api_key="nwc_live_...", model="newera-s2s-mini")
+```
+
+An unknown model name raises `ValueError` before anything connects.
+
+### Billing
+
+Calls are billed per connected second. The clock starts when the connection
+opens and stops when it closes. The total is rounded up to the next whole second,
+with a minimum of 30 seconds per call.
+
+* `newera-s2s`: 0.20 SAR per minute (0.0033333333 SAR per second)
+* `newera-s2s-mini`: 0.10 SAR per minute (0.0016666667 SAR per second)
+
+Examples: a 5-second call is billed as 30 seconds, which is 0.10 SAR on
+`newera-s2s` or 0.05 SAR on `newera-s2s-mini`. A call of 2 minutes 3.4 seconds is
+billed as 124 seconds, which is 0.41 SAR on `newera-s2s` or 0.21 SAR on
+`newera-s2s-mini`.
+
+Each API key can run up to 5 calls at the same time.
+
 ## The call
 
 ```python
@@ -122,12 +154,11 @@ functions ran.
 returns a `Reply(transcript, audio, status, usage, events)`; handy for text-only
 scripts and tests.
 
-`VoiceAgent(...)` takes `api_key`, `instructions`, `voice`, `tool_choice`
-(`"auto"`, `"none"`, `"required"`, or `{"type": "function", "name": ...}`),
-`max_tool_steps`, `auto_continue`, `llm` (`"newera-chat-large"`, the default, or
-`"newera-chat-small"`: the fastest first word and the lowest cost),
-`session` (extra `session.update` fields such as
-`{"tts": {"quality": "studio"}}`), `url` and `headers`.
+`VoiceAgent(...)` takes `api_key`, `instructions`, `voice`, `model` (see
+[Models](#models)), `tool_choice` (`"auto"`, `"none"`, `"required"`, or
+`{"type": "function", "name": ...}`), `max_tool_steps`, `auto_continue`,
+`session` (extra `session.update` fields such as `{"tts": {"quality": "studio"}}`),
+`url` and `headers`.
 
 `auto_continue=False` is the OpenAI-style flow: after your outputs the SDK sends
 `response.create` itself and the server does not continue on its own.
