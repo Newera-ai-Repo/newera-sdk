@@ -4,7 +4,8 @@
 
 Speech-to-speech calls with tool calling, in Python. Newera listens, talks (Saudi
 Arabic and English) and decides when to call **your functions**; you write the
-functions.
+functions. And a **talking avatar**: the same voice with a face, in one command
+(`newera avatar`) or a few lines of Python. See [The avatar](#the-avatar).
 
 ```python
 import asyncio
@@ -45,7 +46,119 @@ pip install newera-sdk
 
 The import name is `newera`: `from newera import VoiceAgent`.
 
-It needs Python 3.9 or newer and depends only on `websockets`.
+It needs Python 3.9 or newer and depends on `websockets` (and `certifi`, for TLS certificates).
+For the live avatar call (microphone, speaker, window) install the extra:
+
+```
+pip install "newera-sdk[avatar]"
+```
+
+## The avatar
+
+A talking face that answers by voice, in real time: you stream the caller's audio in and get the
+assistant's speech back as **video with its sound** (512 x 512, 25 frames per second, lip-synced) plus the
+words of both sides. It speaks Arabic and English. Access is on request: your organisation must be enabled
+for the avatar (ask your Newera account manager). **One avatar call can run at a time, across all
+customers**; a second one is refused with `AvatarBusy`.
+
+### Try it: one command
+
+```
+pip install "newera-sdk[avatar]"
+export NEWERA_API_KEY=nwc_live_...
+newera avatar
+```
+
+Your microphone is the caller, your speaker plays the avatar, a window shows the face and the transcript is
+printed in the terminal. **Use headphones**, or the avatar hears itself and interrupts. Press Ctrl+C (or Esc, or
+close the window) to end the call. On macOS the terminal asks once for microphone access.
+
+Options: `--voice male|female`, `--language ar|en` (default: detected on every turn), `--model newera-s2s-mini`,
+`--instructions "..."`, `--image me.jpg` (your own face; only of a person who agreed to be animated),
+`--idle-video`, `--record call.mp4`, `--no-window`, `--mute`, and `--input-file question.wav` to replay a WAV
+as the caller instead of the microphone. The same from Python: `from newera import talk; talk(voice="male")`.
+
+### In Python
+
+```python
+import asyncio
+from newera import Newera
+
+async def main():
+    client = Newera()                                   # NEWERA_API_KEY from the environment
+    async with client.avatar.connect(avatar="lama", voice="female", record=True) as call:
+        await call.send_file("question.wav")            # streamed at real time, as a microphone would
+        reply = await call.wait_reply()
+        print(reply.user_text, "->", reply.text)
+        call.save_mp4("reply.mp4")                      # frames and audio muxed (needs ffmpeg)
+
+asyncio.run(main())
+```
+
+[`examples/avatar_quickstart.py`](examples/avatar_quickstart.py) is this, complete.
+
+`client.avatar.connect(...)` takes `avatar` (a preset face, `"lama"`), `image` (your own photo: a path, bytes or
+base64), `voice` (`"male"` or `"female"`, independent of the face), `language` (`"ar"`, `"en"`, or `None` to
+detect), `model` (`"newera-s2s"` or `"newera-s2s-mini"`), `idle_video` (also stream the face while it listens),
+`instructions`, `record` (keep the video so `save_mp4` works), and any other realtime `session.update`
+setting as a keyword (`turn_detection=...`, `tools=...`).
+
+The call object:
+
+* `await call.send_audio(pcm16_bytes)`: PCM16 mono 24 kHz, in real time, about 20 ms at a time (keep sending
+  silence too, so turn detection works). `await call.send_file("q.wav")` streams a WAV at real time for you,
+  resampling it if needed. `await call.send_text("hello")` is a typed turn.
+* `async for event in call.events():` every server event, typed: `UserTranscript(text)`,
+  `ReplyTextDelta(text)`, `ReplyText(text)`, `VideoChunk` (`frames`: JPEG bytes, `audio`: the PCM16 24 kHz of exactly
+  those frames, `frame_index`, `start_ms`, `fps`), `Interrupted` (the caller started talking: drop everything
+  queued), `Unavailable`, `ResponseDone`, `ErrorEvent`, and `OtherEvent` for the rest of the realtime protocol.
+  `call.frames()` yields `(frame_index, jpeg)` and `call.audio()` the reply audio, if that is all you need.
+* `await call.wait_reply()` collects the next reply: `AvatarReply(user_text, text, frames, audio, chunks,
+  first_text_s, first_video_s)`.
+* `call.save_mp4(path)` (needs ffmpeg), `call.save_wav(path)`, `call.save_frames(dir)`: of the recorded call.
+* `await call.close()` (also at the end of `async with`): sends `session.end`; `call.summary` then holds the
+  connected and billed seconds.
+
+Play the video with the audio as the clock: show frame `frame_index / fps` seconds into the audio of the same
+event; buffer about 2 seconds before a reply starts (the face is rendered a little slower than real time).
+`newera avatar` does exactly this (`newera.talk.Playback`); the docs have the same logic for browsers.
+
+### Before and during a call
+
+```python
+availability = await client.avatar.availability()       # Availability(busy=False, available=True)
+```
+
+The answer can change a moment later, so still handle the errors; all are `NeweraError`s:
+
+| exception | when |
+|---|---|
+| `AvatarBusy` | the avatar is in another call: tell your user, wait a few seconds, try again |
+| `AvatarUnavailable` | the face or Newera Core is temporarily unavailable |
+| `NotEnabled` | the organisation is not enabled for the avatar or the voice model |
+| `AuthenticationError` | missing or wrong key, or a used or expired client secret |
+| `InsufficientQuota` | the prepaid balance cannot cover the call |
+| `RateLimited` | too many requests, or the key is at its concurrent-call limit |
+| `InvalidRequest` | a bad session field or model (`invalid_avatar_image`: no usable face in the photo) |
+| `CallTimeLimit` | the call reached its 30-minute limit |
+
+Each has `.code`, `.message` and `.close_code`. A refused call is never billed.
+
+### A browser page
+
+An API key must not sit in a web page. Your server trades it for a one-use client secret that is good for 60
+seconds, and the page connects with that:
+
+```python
+secret = await client.avatar.create_session(model="newera-s2s")      # ClientSecret(value="avs_...", expires_at=...)
+```
+
+[`examples/avatar_server_token.py`](examples/avatar_server_token.py) is a FastAPI endpoint that returns it. The page
+opens `wss://api.newera.ai/v1/avatar` with the subprotocols `["realtime", "newera-client-secret." + secret]`
+(see the docs for the player code). Python can connect with a secret too:
+`client.avatar.connect(client_secret=secret)`.
+
+Only send a photo (`image=`) of a person who agreed to be animated, and tell them what it is for.
 
 ## Tools
 
@@ -190,7 +303,8 @@ their own short-lived credentials instead.
 pip install -e '.[test]' && pytest
 ```
 
-The tests run the SDK against a fake WebSocket server; no network, no key.
+The tests run the SDK against a fake WebSocket server; no network, no key. `tests/test_avatar_e2e.py` talks to the
+real avatar and is skipped unless `NEWERA_API_KEY` is set (use a key enabled for the avatar).
 
 ## Releasing
 
