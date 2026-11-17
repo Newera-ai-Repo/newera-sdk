@@ -28,4 +28,4 @@ __all__ = ["VoiceAgent", "Call", "Event", "Reply", "ToolSpec", "NeweraError", "D
            "ErrorEvent", "OtherEvent",
            "AvatarError", "InvalidRequest", "AuthenticationError", "InsufficientQuota", "NotEnabled",
            "CallTimeLimit", "RateLimited", "AvatarBusy", "AvatarUnavailable"]
-__version__ = "0.3.0"
+__version__ = "0.3.1"

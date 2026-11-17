@@ -21,8 +21,6 @@ from newera import AvatarBusy, Newera, NotEnabled
 
 async def main(args):
     client = Newera()                                    # NEWERA_API_KEY from the environment
-    if not (await client.avatar.availability()).free:
-        raise SystemExit("The avatar is in another call right now (one at a time). Try again in a few minutes.")
     async with client.avatar.connect(avatar="lama", voice=args.voice, record=True,
                                      instructions="You are a friendly assistant. Answer in one or two short sentences.") as call:
         if args.text:
@@ -53,6 +51,6 @@ if __name__ == "__main__":
     try:
         asyncio.run(main(args))
     except AvatarBusy:
-        raise SystemExit("The avatar is busy: it is in another call right now. Try again in a few minutes.")
+        raise SystemExit("The avatar can't take this call right now. Try again shortly.")
     except NotEnabled:
         raise SystemExit("This key is not enabled for the avatar. Ask your Newera account manager.")

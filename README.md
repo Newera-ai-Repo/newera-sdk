@@ -58,8 +58,7 @@ pip install "newera-sdk[avatar]"
 A talking face that answers by voice, in real time: you stream the caller's audio in and get the
 assistant's speech back as **video with its sound** (512 x 512, 25 frames per second, lip-synced) plus the
 words of both sides. It speaks Arabic and English. Access is on request: your organisation must be enabled
-for the avatar (ask your Newera account manager). **One avatar call can run at a time, across all
-customers**; a second one is refused with `AvatarBusy`.
+for the avatar (ask your Newera account manager).
 
 ### Try it: one command
 
@@ -120,27 +119,23 @@ The call object:
   connected and billed seconds.
 
 Play the video with the audio as the clock: show frame `frame_index / fps` seconds into the audio of the same
-event; buffer about 2 seconds before a reply starts (the face is rendered a little slower than real time).
+event; buffer about 2 seconds before a reply starts.
 `newera avatar` does exactly this (`newera.talk.Playback`); the docs have the same logic for browsers.
 
-### Before and during a call
+### Errors
 
-```python
-availability = await client.avatar.availability()       # Availability(busy=False, available=True)
-```
-
-The answer can change a moment later, so still handle the errors; all are `NeweraError`s:
+A call can be refused or ended; handle these errors, all `NeweraError`s:
 
 | exception | when |
 |---|---|
-| `AvatarBusy` | the avatar is in another call: tell your user, wait a few seconds, try again |
+| `AvatarBusy` | the avatar can't take this call right now: tell your user and try again shortly |
 | `AvatarUnavailable` | the face or Newera Core is temporarily unavailable |
 | `NotEnabled` | the organisation is not enabled for the avatar or the voice model |
 | `AuthenticationError` | missing or wrong key, or a used or expired client secret |
 | `InsufficientQuota` | the prepaid balance cannot cover the call |
-| `RateLimited` | too many requests, or the key is at its concurrent-call limit |
+| `RateLimited` | too many requests, or too many calls on this key right now |
 | `InvalidRequest` | a bad session field or model (`invalid_avatar_image`: no usable face in the photo) |
-| `CallTimeLimit` | the call reached its 30-minute limit |
+| `CallTimeLimit` | the service ended the call |
 
 Each has `.code`, `.message` and `.close_code`. A refused call is never billed.
 
@@ -305,6 +300,11 @@ pip install -e '.[test]' && pytest
 
 The tests run the SDK against a fake WebSocket server; no network, no key. `tests/test_avatar_e2e.py` talks to the
 real avatar and is skipped unless `NEWERA_API_KEY` is set (use a key enabled for the avatar).
+
+## Release notes
+
+* 0.3.1: documentation and message wording for the avatar. No change in behaviour.
+* 0.3.0: the talking avatar (`client.avatar`, `newera avatar`).
 
 ## Releasing
 

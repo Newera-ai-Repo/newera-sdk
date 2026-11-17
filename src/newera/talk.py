@@ -9,8 +9,8 @@ the caller interrupting. Press Ctrl+C (or close the window, or press Esc) to end
 
 The playback follows the browser player of the API docs: the audio is the clock. Each video event brings
 its frames and the audio of exactly those frames; the audio is queued to the speaker, frames are shown
-when the audio clock reaches their time, a reply starts after a short buffer (the face is rendered a
-little slower than real time), and `avatar.interrupted` drops everything not yet played.
+when the audio clock reaches their time, a reply starts after a short buffer (a short buffer
+keeps playback smooth), and `avatar.interrupted` drops everything not yet played.
 """
 
 from __future__ import annotations
@@ -128,7 +128,7 @@ async def _drive(opts: dict, player: Playback, status: Status, stop: asyncio.Eve
     try:
         avail = await client.avatar.availability()
         if avail.busy:
-            out("The avatar is busy: it is in another call right now (one call at a time). Try again in a few minutes.")
+            out("The avatar can't take this call right now. Try again shortly.")
             return 3
         if not avail.available:
             out("The avatar is temporarily unavailable. Try again shortly.")
@@ -203,7 +203,7 @@ async def _drive(opts: dict, player: Playback, status: Status, stop: asyncio.Eve
 
 def _report(exc: AvatarError, out) -> int:
     if isinstance(exc, AvatarBusy):
-        out("The avatar is busy: it is in another call right now (one call at a time). Try again in a few minutes.")
+        out("The avatar can't take this call right now. Try again shortly.")
         return 3
     if isinstance(exc, NotEnabled):
         out("This key is not enabled for the avatar (%s). Ask your Newera account manager to enable it." % exc.code)

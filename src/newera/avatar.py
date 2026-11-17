@@ -75,15 +75,15 @@ class NotEnabled(AvatarError):
 
 
 class CallTimeLimit(AvatarError):
-    """4408: the call reached its 30-minute limit."""
+    """4408: the service ended the call."""
 
 
 class RateLimited(AvatarError):
-    """4429: too many requests, or the key is at its concurrent-call limit."""
+    """4429: too many requests, or too many calls on this key right now."""
 
 
 class AvatarBusy(AvatarError):
-    """4503 avatar_busy: the avatar is in another call (one at a time across all customers). Retry later."""
+    """4503 avatar_busy: the avatar can't take this call right now. Retry shortly."""
 
 
 class AvatarUnavailable(AvatarError):
@@ -475,7 +475,7 @@ class Availability:
 
     @property
     def free(self) -> bool:
-        """True when a call would be accepted right now."""
+        """True when the avatar can take a call right now."""
         return self.available and not self.busy
 
 
@@ -486,8 +486,7 @@ class Avatar:
         self._client = client
 
     async def availability(self) -> Availability:
-        """Is the avatar free? (`await client.avatar.availability()`). The answer can change a moment later,
-        so still handle AvatarBusy."""
+        """Whether the avatar can take a call right now. Still handle AvatarBusy when connecting."""
         data = await asyncio.to_thread(self._client._http, "GET", "/v1/avatar/availability")
         return Availability(busy=bool(data.get("busy")), available=bool(data.get("available", True)))
 

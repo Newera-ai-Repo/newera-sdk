@@ -466,7 +466,7 @@ def test_cli_busy_message(monkeypatch, capsys, http):
     monkeypatch.setenv("NEWERA_API_KEY", "k")
     monkeypatch.setenv("NEWERA_BASE_URL", http)
     assert main(["avatar", "--no-window", "--mute"]) == 3
-    assert "busy" in capsys.readouterr().out
+    assert "can't take this call" in capsys.readouterr().out
 
 
 def test_wait_reply_keeps_collecting_video_that_arrives_after_response_done():
