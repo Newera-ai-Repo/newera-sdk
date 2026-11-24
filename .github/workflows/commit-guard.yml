@@ -1,0 +1,44 @@
+name: commit-guard
+
+# Keeps the contributors list clean: blocks Co-Authored-By trailers,
+# AI-tool footers and AI-tool identities in commits and pull requests.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  commit-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check pull request commits, title and body
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: .github/scripts/check-commits.sh "$BASE..$HEAD"
+      - name: Check pushed commits
+        if: github.event_name == 'push'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ -z "$AFTER" ] || [ "$AFTER" = "0000000000000000000000000000000000000000" ]; then
+            echo "branch deleted, nothing to check"; exit 0
+          fi
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            BASE=$(git merge-base "origin/$DEFAULT" "$AFTER" 2>/dev/null || true)
+            if [ -n "$BASE" ] && [ "$BASE" != "$AFTER" ]; then RANGE="$BASE..$AFTER"; else RANGE="$AFTER"; fi
+          else
+            RANGE="$BEFORE..$AFTER"
+          fi
+          .github/scripts/check-commits.sh "$RANGE"
