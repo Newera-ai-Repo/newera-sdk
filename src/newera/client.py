@@ -71,6 +71,12 @@ class Newera:
                 err = json.loads(exc.read().decode()).get("error") or {}
             except Exception:  # noqa: BLE001 - not JSON
                 err = {}
-            raise error_for(err.get("code"), err.get("message") or "HTTP %s" % exc.code, http_status=exc.code) from exc
+            retry = err.get("retry_after_s") or exc.headers.get("Retry-After")
+            try:
+                retry = int(retry) if retry is not None else None
+            except (TypeError, ValueError):
+                retry = None
+            raise error_for(err.get("code"), err.get("message") or "HTTP %s" % exc.code, http_status=exc.code,
+                            retry_after_s=retry) from exc
         except urllib.error.URLError as exc:
             raise error_for("connection_error", "Could not reach %s: %s" % (self.base_url, exc.reason)) from exc

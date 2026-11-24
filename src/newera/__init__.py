@@ -6,10 +6,11 @@
 from .agent import DEFAULT_URL, Call, Event, NeweraError, Reply, ToolSpec, VoiceAgent
 from .avatar import (AudioDelta, Availability, AvatarBusy, AvatarCall, AvatarError, AvatarEvent, AvatarReady,
                      AvatarReply, AvatarUnavailable, AuthenticationError, CallTimeLimit, ClientSecret, ErrorEvent,
-                     InsufficientQuota, Interrupted, InvalidRequest, NotEnabled, OtherEvent, RateLimited,
+                     InsufficientQuota, Interrupted, InvalidRequest, Line, LineDone, LineError, LineStarted, NotEnabled, OtherEvent, RateLimited,
                      ReplyText, ReplyTextDelta, ResponseDone, SessionSummary, SpeechStarted, SpeechStopped,
-                     Timeline, Unavailable, UserTranscript, VideoChunk)
+                     Timeline, Unavailable, UserTranscript, VideoChunk, WrongMode)
 from .client import Newera
+from .player import LipSyncPlayer
 from .schema import function_schema, type_schema
 
 
@@ -27,5 +28,6 @@ __all__ = ["VoiceAgent", "Call", "Event", "Reply", "ToolSpec", "NeweraError", "D
            "ReplyTextDelta", "ReplyText", "SpeechStarted", "SpeechStopped", "ResponseDone", "SessionSummary",
            "ErrorEvent", "OtherEvent",
            "AvatarError", "InvalidRequest", "AuthenticationError", "InsufficientQuota", "NotEnabled",
-           "CallTimeLimit", "RateLimited", "AvatarBusy", "AvatarUnavailable"]
-__version__ = "0.3.1"
+           "CallTimeLimit", "RateLimited", "AvatarBusy", "AvatarUnavailable",
+           "WrongMode", "LineError", "Line", "LineStarted", "LineDone", "LipSyncPlayer"]
+__version__ = "0.4.0"

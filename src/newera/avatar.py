@@ -33,7 +33,7 @@ import urllib.parse
 import urllib.request
 import wave
 from array import array
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable, Iterable
 
 import websockets
 
@@ -41,6 +41,7 @@ from .agent import NeweraError
 
 DEFAULT_BASE_URL = "https://api.newera.ai"
 MODELS = ("newera-s2s", "newera-s2s-mini")
+MODES = ("conversational", "render-audio", "render-text")
 VOICES = ("male", "female")
 FPS = 25
 AUDIO_RATE = 24000
@@ -51,11 +52,13 @@ CHUNK_MS = 20                       # microphone block: 20 ms, as the protocol r
 
 class AvatarError(NeweraError):
     """A refusal or failure from the avatar service. `code` is the error code ("avatar_busy"),
-    `close_code` the WebSocket close code (4503) when the socket was closed with one."""
+    `close_code` the WebSocket close code (4503) when the socket was closed with one. `retry_after_s` is how
+    many seconds to wait before trying again, when the server said (avatar_busy)."""
 
-    def __init__(self, code: str, message: str, close_code: int | None = None, http_status: int | None = None):
+    def __init__(self, code: str, message: str, close_code: int | None = None, http_status: int | None = None,
+                 retry_after_s: int | None = None):
         super().__init__(code, message)
-        self.close_code, self.http_status = close_code, http_status
+        self.close_code, self.http_status, self.retry_after_s = close_code, http_status, retry_after_s
 
 
 class InvalidRequest(AvatarError):
@@ -83,7 +86,18 @@ class RateLimited(AvatarError):
 
 
 class AvatarBusy(AvatarError):
-    """4503 avatar_busy: the avatar can't take this call right now. Retry shortly."""
+    """4503 avatar_busy: the avatar can't take this call right now. Retry after `retry_after_s` seconds
+    (None when the server did not say)."""
+
+
+class WrongMode(InvalidRequest):
+    """wrong_mode: the event does not belong to this call's mode (a line event in conversational mode, an audio
+    line in render-text mode, ...)."""
+
+
+class LineError(InvalidRequest):
+    """A refused line: invalid_line_id, duplicate_line, too_many_lines, line_too_long, invalid_audio, invalid_text,
+    text_too_long."""
 
 
 class AvatarUnavailable(AvatarError):
@@ -97,7 +111,11 @@ _BY_CODE = {
     "avatar_not_enabled": NotEnabled, "model_not_entitled": NotEnabled,
     "call_time_limit": CallTimeLimit,
     "rate_limit_exceeded": RateLimited, "concurrent_call_limit": RateLimited,
-    "avatar_busy": AvatarBusy, "avatar_unavailable": AvatarUnavailable,
+    "avatar_busy": AvatarBusy, "avatar_unavailable": AvatarUnavailable, "model_unavailable": AvatarUnavailable,
+    "avatar_concurrency_limit": RateLimited, "session_time_limit": CallTimeLimit,
+    "invalid_mode": InvalidRequest, "wrong_mode": WrongMode,
+    "invalid_line_id": LineError, "duplicate_line": LineError, "too_many_lines": LineError,
+    "line_too_long": LineError, "invalid_audio": LineError, "invalid_text": LineError, "text_too_long": LineError,
 }
 _BY_CLOSE = {4400: InvalidRequest, 4401: AuthenticationError, 4402: InsufficientQuota, 4403: NotEnabled,
              4408: CallTimeLimit, 4429: RateLimited, 4503: AvatarUnavailable}
@@ -106,10 +124,10 @@ _BY_HTTP = {400: InvalidRequest, 401: AuthenticationError, 402: InsufficientQuot
 
 
 def error_for(code: str | None, message: str = "", close_code: int | None = None,
-              http_status: int | None = None) -> AvatarError:
+              http_status: int | None = None, retry_after_s: int | None = None) -> AvatarError:
     """The exception for an error code, falling back to the close code or HTTP status."""
     cls = _BY_CODE.get(code or "") or _BY_CLOSE.get(close_code or 0) or _BY_HTTP.get(http_status or 0) or AvatarError
-    return cls(code or "error", message, close_code, http_status)
+    return cls(code or "error", message, close_code, http_status, retry_after_s)
 
 
 # ------------------------------------------------------------------------------------------ events
@@ -133,6 +151,7 @@ class AvatarReady(AvatarEvent):
     video_format: str = "jpeg"
     audio_sample_rate: int = AUDIO_RATE
     frames_per_event: int = 7
+    mode: str = "conversational"
 
 
 @dataclasses.dataclass
@@ -141,7 +160,11 @@ class VideoChunk(AvatarEvent):
 
     `frames` are JPEG bytes in display order; `audio` is PCM16 mono bytes at `sample_rate` (None for the
     listening face, `speech=False`, which only comes with idle_video). Show frame `frame_index` at
-    `frame_index / fps` seconds on the same clock as the audio."""
+    `frame_index / fps` seconds on the same clock as the audio.
+
+    `audio_start_ms` / `audio_end_ms` place this chunk's audio on the stream clock (every chunk has them, idle
+    ones too); frame `i` of the chunk is due at `audio_start_ms + i * 1000 / fps`. `line_id` is the line that is
+    speaking (None for the listening face). `newera.player.LipSyncPlayer` plays this."""
     frame_index: int = 0
     start_ms: int = 0
     frames: list = dataclasses.field(default_factory=list, repr=False)
@@ -154,6 +177,9 @@ class VideoChunk(AvatarEvent):
     generation_ms: int = 0
     queued_ms: int = 0
     index: int = 0
+    audio_start_ms: float = 0.0
+    audio_end_ms: float = 0.0
+    line_id: str | None = None
 
     def __repr__(self) -> str:
         return ("VideoChunk(frame_index=%d, start_ms=%d, frames=%d, audio=%s, speech=%s, generation_ms=%d)"
@@ -164,6 +190,10 @@ class VideoChunk(AvatarEvent):
     @property
     def duration_ms(self) -> float:
         return len(self.frames) * 1000.0 / self.fps
+
+    def frame_times_ms(self) -> list:
+        """When each frame is due, in ms on the stream clock (the clock of `audio_start_ms`)."""
+        return [self.audio_start_ms + i * 1000.0 / self.fps for i in range(len(self.frames))]
 
 
 @dataclasses.dataclass
@@ -181,6 +211,21 @@ class Unavailable(AvatarEvent):
 class AudioDelta(AvatarEvent):
     """`response.audio.delta`, sent only after `avatar.unavailable`: PCM16 mono 24 kHz bytes."""
     audio: bytes = dataclasses.field(default=b"", repr=False)
+    line_id: str | None = None
+
+
+@dataclasses.dataclass
+class LineStarted(AvatarEvent):
+    """`avatar.line.started`: just before the first speaking frame of the line. `at_ms` is on the stream clock."""
+    line_id: str = ""
+    at_ms: float = 0.0
+
+
+@dataclasses.dataclass
+class LineDone(AvatarEvent):
+    """`avatar.line.done`: `status` is "completed", "interrupted" or "failed"."""
+    line_id: str = ""
+    status: str = ""
 
 
 @dataclasses.dataclass
@@ -241,9 +286,11 @@ class ErrorEvent(AvatarEvent):
     message: str = ""
     error_type: str = ""
     param: str | None = None
+    retry_after_s: int | None = None
+    event_id: str | None = None       # the event_id of the client event it answers, when it had one
 
     def exception(self, close_code: int | None = None) -> AvatarError:
-        return error_for(self.code, self.message, close_code)
+        return error_for(self.code, self.message, close_code, retry_after_s=self.retry_after_s)
 
 
 @dataclasses.dataclass
@@ -263,18 +310,27 @@ def parse_event(data: dict) -> AvatarEvent:
             fps=int(data.get("fps") or FPS), width=int(data.get("width") or 512), height=int(data.get("height") or 512),
             speech=bool(data.get("speech", True)), audio=base64.b64decode(audio) if audio else None,
             sample_rate=int(data.get("audio_sample_rate") or AUDIO_RATE), generation_ms=int(data.get("generation_ms") or 0),
-            queued_ms=int(data.get("queued_ms") or 0), index=int(data.get("index") or 0))
+            queued_ms=int(data.get("queued_ms") or 0), index=int(data.get("index") or 0),
+            audio_start_ms=_ms(data, "audio_start_ms", data.get("start_ms")),
+            audio_end_ms=_ms(data, "audio_end_ms", None) or (
+                _ms(data, "audio_start_ms", data.get("start_ms")) + len(data.get("frames") or []) * 1000.0 / int(data.get("fps") or FPS)),
+            line_id=data.get("line_id"))
     if t == "avatar.ready":
         return AvatarReady(raw=data, fps=int(data.get("fps") or FPS), width=int(data.get("width") or 512),
                            height=int(data.get("height") or 512), video_format=data.get("video_format", "jpeg"),
                            audio_sample_rate=int(data.get("audio_sample_rate") or AUDIO_RATE),
-                           frames_per_event=int(data.get("frames_per_event") or 7))
+                           frames_per_event=int(data.get("frames_per_event") or 7),
+                           mode=data.get("mode") or "conversational")
     if t == "avatar.interrupted":
         return Interrupted(raw=data)
     if t == "avatar.unavailable":
         return Unavailable(raw=data, message=data.get("message", ""))
     if t == "response.audio.delta":
-        return AudioDelta(raw={"type": t}, audio=base64.b64decode(data.get("delta") or ""))
+        return AudioDelta(raw={"type": t}, audio=base64.b64decode(data.get("delta") or ""), line_id=data.get("line_id"))
+    if t == "avatar.line.started":
+        return LineStarted(raw=data, line_id=data.get("line_id") or "", at_ms=_ms(data, "at_ms", 0))
+    if t == "avatar.line.done":
+        return LineDone(raw=data, line_id=data.get("line_id") or "", status=data.get("status") or "")
     if t == "conversation.item.input_audio_transcription.completed":
         return UserTranscript(raw=data, text=data.get("transcript") or "", item_id=data.get("item_id", ""))
     if t == "response.audio_transcript.delta":
@@ -294,9 +350,18 @@ def parse_event(data: dict) -> AvatarEvent:
         return SessionSummary(raw=data, summary=data.get("summary") or {})
     if t == "error":
         e = data.get("error") or {}
+        retry = e.get("retry_after_s")
         return ErrorEvent(raw=data, code=e.get("code") or "error", message=e.get("message") or "",
-                          error_type=e.get("type") or "", param=e.get("param"))
+                          error_type=e.get("type") or "", param=e.get("param"),
+                          retry_after_s=int(retry) if isinstance(retry, (int, float)) else None,
+                          event_id=e.get("event_id"))
     return OtherEvent(raw=data)
+
+
+def _ms(data: dict, key: str, default) -> float:
+    v = data.get(key)
+    v = default if v is None else v
+    return float(v or 0)
 
 
 def _output_text(response: dict) -> str:
@@ -463,9 +528,13 @@ class ClientSecret:
     value: str
     expires_at: int
     model: str
+    mode: str = "conversational"
 
     def as_dict(self) -> dict:
-        return {"client_secret": {"value": self.value, "expires_at": self.expires_at}, "model": self.model}
+        d = {"client_secret": {"value": self.value, "expires_at": self.expires_at}, "model": self.model}
+        if self.mode != "conversational":
+            d["mode"] = self.mode
+        return d
 
 
 @dataclasses.dataclass
@@ -490,22 +559,37 @@ class Avatar:
         data = await asyncio.to_thread(self._client._http, "GET", "/v1/avatar/availability")
         return Availability(busy=bool(data.get("busy")), available=bool(data.get("available", True)))
 
-    async def create_session(self, model: str = "newera-s2s") -> ClientSecret:
+    async def create_session(self, model: str = "newera-s2s", *, mode: str = "conversational") -> ClientSecret:
         """Trade the API key for a client secret (`avs_...`, one use, 60 seconds) that a browser opens the
-        WebSocket with; call it from your server, never from a page."""
-        _check_model(model)
-        data = await asyncio.to_thread(self._client._http, "POST", "/v1/avatar/sessions", {"model": model})
+        WebSocket with; call it from your server, never from a page. `mode` is checked against your
+        entitlements now (the page still opens the socket with `?mode=` itself). `model` is for conversational."""
+        _check_mode(mode)
+        body: dict = {}
+        if mode == "conversational":
+            _check_model(model)
+            body["model"] = model
+        else:
+            body["mode"] = mode
+        data = await asyncio.to_thread(self._client._http, "POST", "/v1/avatar/sessions", body)
         secret = data.get("client_secret") or {}
         if not secret.get("value"):
             raise AvatarError("invalid_response", "The server did not return a client secret.")
         return ClientSecret(value=secret["value"], expires_at=int(secret.get("expires_at") or 0),
-                            model=data.get("model") or model)
+                            model=data.get("model") or model, mode=data.get("mode") or mode)
 
     def connect(self, avatar: str = "lama", *, voice: str = "female", language: str | None = None,
                 model: str = "newera-s2s", image: Any = None, face_crop: bool = True, idle_video: bool = False,
                 instructions: str | None = None, input_sample_rate: int = AUDIO_RATE, record: bool = False,
-                client_secret: str | ClientSecret | None = None, **realtime_settings) -> "_Connect":
+                client_secret: str | ClientSecret | None = None, mode: str | None = None,
+                **realtime_settings) -> "_Connect":
         """Open a call: `async with client.avatar.connect(...) as call:`.
+
+        mode           "conversational" (default: the avatar listens and answers), "render-audio" (you stream
+                       your own PCM16 24 kHz audio, line by line; the face lip-syncs it verbatim) or
+                       "render-text" (you send the exact text of each line; Newera voices it). In the two render
+                       modes only the face options apply (avatar, image, face_crop, idle_video, record,
+                       client_secret); `voice` is chosen per line (`call.speak(text, voice=...)`), and
+                       `language`, `instructions`, `model` and realtime settings raise ValueError.
 
         avatar         a preset face ("lama") ...
         image          ... or your own: a path, bytes, base64 or data URL of a JPEG, PNG or WebP of one person who
@@ -523,12 +607,26 @@ class Avatar:
             raise ValueError("voice must be one of %s, not %r" % (", ".join(VOICES), voice))
         if language not in (None, "auto", "ar", "en"):
             raise ValueError('language must be "ar", "en" or None (detect), not %r' % (language,))
-        session = build_session(avatar=avatar, voice=voice, language=language, image=image, face_crop=face_crop,
-                                idle_video=idle_video, instructions=instructions,
-                                input_sample_rate=input_sample_rate, settings=realtime_settings)
         if isinstance(client_secret, ClientSecret):
+            mode = mode or client_secret.mode
             model, client_secret = client_secret.model, client_secret.value
-        return _Connect(self._client, session, model, record, client_secret)
+        mode = mode or "conversational"
+        _check_mode(mode)
+        if mode == "conversational":
+            session = build_session(avatar=avatar, voice=voice, language=language, image=image, face_crop=face_crop,
+                                    idle_video=idle_video, instructions=instructions,
+                                    input_sample_rate=input_sample_rate, settings=realtime_settings)
+        else:
+            if language or instructions or realtime_settings or model != "newera-s2s" or input_sample_rate != AUDIO_RATE:
+                raise ValueError("language, instructions, model, input_sample_rate and realtime settings are for "
+                                 "conversational mode; the render modes take only the face options.")
+            session = build_session(avatar=avatar, voice=None, image=image, face_crop=face_crop, idle_video=idle_video)
+        return _Connect(self._client, session, model, record, client_secret, mode)
+
+
+def _check_mode(mode: str) -> None:
+    if mode not in MODES:
+        raise ValueError("mode must be one of %s, not %r" % (", ".join(MODES), mode))
 
 
 def _check_model(model: str) -> None:
@@ -573,8 +671,10 @@ def _image_b64(image: Any) -> str:
 
 
 class _Connect:
-    def __init__(self, client, session: dict, model: str, record: bool, secret: str | None):
+    def __init__(self, client, session: dict, model: str, record: bool, secret: str | None,
+                 mode: str = "conversational"):
         self.client, self.session, self.model, self.record, self.secret = client, session, model, record, secret
+        self.mode = mode
         self.call: AvatarCall | None = None
 
     def __await__(self):
@@ -583,11 +683,17 @@ class _Connect:
     async def __aenter__(self) -> "AvatarCall":
         kwargs: dict = {"max_size": None}       # a video event is a few hundred KB
         url = self.client.avatar_ws_url
+        query: dict = {}
         if self.secret:
             kwargs["subprotocols"] = ["realtime", "newera-client-secret." + self.secret]
         else:
             kwargs["additional_headers"] = self.client._headers()
-            url += "?" + urllib.parse.urlencode({"model": self.model})
+            if self.mode == "conversational":
+                query["model"] = self.model
+        if self.mode != "conversational":
+            query["mode"] = self.mode          # the secret does not carry the mode: it is always in the URL
+        if query:
+            url += "?" + urllib.parse.urlencode(query)
         ctx = self.client._ssl_context()
         if ctx is not None:
             kwargs["ssl"] = ctx
@@ -596,7 +702,7 @@ class _Connect:
         except websockets.InvalidStatus as exc:
             raise error_for(None, "The server refused the connection (HTTP %s)." % exc.response.status_code,
                             http_status=exc.response.status_code) from exc
-        self.call = AvatarCall(ws, self.session, record=self.record)
+        self.call = AvatarCall(ws, self.session, record=self.record, mode=self.mode)
         try:
             await self.call._start()
         except BaseException:
@@ -609,11 +715,122 @@ class _Connect:
             await self.call.close()
 
 
+class Line:
+    """One line of speech of a render-mode call, from `call.start_line()`, `call.send_line()` or `call.speak()`.
+
+    Its state follows the server: `await line.wait_started()` (the first speaking frame is about to play) and
+    `status = await line.wait()` ("completed", "interrupted" or "failed"). Feed audio with `append()` while
+    you synthesise it, or hand `stream()` an iterator; leaving `async with` (or `end()`) closes the line."""
+
+    def __init__(self, call: "AvatarCall", line_id: str, kind: str):
+        self.call, self.id, self.kind = call, line_id, kind
+        self.status: str | None = None              # None until the server says it is done
+        self.error: AvatarError | None = None       # why it failed, when the server refused or the call dropped
+        self._started = asyncio.Event()
+        self._done = asyncio.Event()
+        self._ended = kind == "text"                # nothing more to send
+        self._cut = False                           # interrupted: no more audio is taken
+        self._sent = kind == "text"                 # the server knows this line
+
+    def __repr__(self) -> str:
+        return "Line(%r, %s)" % (self.id, self.status or ("ended" if self._ended else "open"))
+
+    @property
+    def done(self) -> bool:
+        return self._done.is_set()
+
+    @property
+    def started(self) -> bool:
+        return self._started.is_set()
+
+    @property
+    def interrupted(self) -> bool:
+        return self._cut or self.status == "interrupted"
+
+    def _finish(self, status: str, error: AvatarError | None = None) -> None:
+        if self._done.is_set():
+            return
+        self.status, self.error = status, error
+        self._done.set()
+
+    async def append(self, pcm: bytes) -> bool:
+        """Send a piece of the line's audio (PCM16 mono 24 kHz). True when it was sent, False when the line was
+        interrupted (stop feeding it). The audio may be as small or as large as you like."""
+        if self.kind != "audio":
+            raise WrongMode("wrong_mode", "Only render-audio lines take audio.")
+        if self._ended:
+            raise RuntimeError("line %r has ended" % self.id)
+        if self._cut or self._done.is_set():
+            return False
+        if not pcm:
+            return True
+        self._sent = True
+        await self.call._line_event(self, "avatar.line.append", audio=base64.b64encode(pcm).decode())
+        return True
+
+    async def stream(self, chunks: "Iterable[bytes] | AsyncIterator[bytes]", *, end: bool = True) -> bool:
+        """Append every chunk of a (async) iterator, e.g. the output of a streaming TTS, then end the line.
+        Stops early, without error, when the line is interrupted; returns False in that case."""
+        ok = True
+        if hasattr(chunks, "__aiter__"):
+            async for piece in chunks:          # type: ignore[union-attr]
+                if not await self.append(piece):
+                    ok = False
+                    break
+        else:
+            for piece in chunks:                # type: ignore[union-attr]
+                if not await self.append(piece):
+                    ok = False
+                    break
+        if end and ok:
+            await self.end()
+        return ok
+
+    async def end(self) -> None:
+        """No more audio for this line. Safe to call twice, and after an interrupt."""
+        if self._ended:
+            return
+        self._ended = True
+        if self.kind == "audio" and not self._cut and not self._done.is_set():
+            self._sent = True
+            await self.call._line_event(self, "avatar.line.end")
+
+    async def wait_started(self, timeout: float | None = None) -> bool:
+        """True once `avatar.line.started` came; False if the line finished without ever speaking."""
+        waiters = [asyncio.ensure_future(self._started.wait()), asyncio.ensure_future(self._done.wait())]
+        try:
+            await asyncio.wait_for(asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED), timeout)
+        finally:
+            for w in waiters:
+                w.cancel()
+        return self._started.is_set()
+
+    async def wait(self, timeout: float | None = None, *, strict: bool = False) -> str:
+        """Wait for `avatar.line.done` and return its status. With `strict=True` a "failed" line raises the
+        typed exception that explains it (LineError, InsufficientQuota, ...). A dropped call fails open lines."""
+        await asyncio.wait_for(self._done.wait(), timeout)
+        if strict and self.status == "failed":
+            raise self.error or self.call.last_error or AvatarError("line_failed", "The line failed.")
+        return self.status or ""
+
+    async def __aenter__(self) -> "Line":
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        with contextlib.suppress(Exception):
+            await self.end()
+
+
 class AvatarCall:
     """An open call. Send audio in, iterate `events()` out; `close()` ends it (or leave the `async with`)."""
 
-    def __init__(self, ws, session: dict, *, record: bool = False):
+    def __init__(self, ws, session: dict, *, record: bool = False, mode: str = "conversational"):
         self._ws = ws
+        self.mode = mode
+        self.lines: dict[str, Line] = {}              # the lines you started (render modes), by id
+        self.last_error: AvatarError | None = None    # the last `error` event, as its exception
+        self._line_callbacks: dict[str, list] = {"started": [], "done": []}
+        self._seq = 0
         self._session = session
         self._queue: asyncio.Queue = asyncio.Queue()
         self._reader: asyncio.Task | None = None
@@ -675,6 +892,7 @@ class AvatarCall:
                     self.timeline.add(ev)
                 elif isinstance(ev, SessionSummary):
                     self.summary = ev.summary
+                self._track(ev)
                 await self._queue.put(ev)
         except asyncio.CancelledError:
             raise
@@ -683,7 +901,39 @@ class AvatarCall:
                 await self._queue.put(exc)
         finally:
             self._note_close()
+            for line in self.lines.values():
+                line._finish("failed", self.last_error or AvatarError(
+                    "closed", "The call closed before the line was done.", self.close_code))
             await self._queue.put(None)
+
+    def _track(self, ev: AvatarEvent) -> None:
+        """Line bookkeeping and callbacks, done by the reader so it works whether or not you iterate events()."""
+        if isinstance(ev, LineStarted):
+            line = self.lines.get(ev.line_id)
+            if line is not None:
+                line._started.set()
+            self._fire("started", ev)
+        elif isinstance(ev, LineDone):
+            line = self.lines.get(ev.line_id)
+            if line is not None:
+                line._started.set()
+                line._finish(ev.status)
+            self._fire("done", ev)
+        elif isinstance(ev, ErrorEvent):
+            self.last_error = ev.exception(self.close_code)
+            eid = ev.event_id or ""
+            line = self.lines.get(eid[5:].rsplit(":", 1)[0]) if eid.startswith("line:") else None
+            if line is not None:          # the server refused this line's event: no `done` will come
+                line._finish("failed", self.last_error)
+
+    def _fire(self, name: str, ev: AvatarEvent) -> None:
+        for cb in self._line_callbacks[name]:
+            try:
+                out = cb(ev)
+                if asyncio.iscoroutine(out):
+                    asyncio.ensure_future(out)
+            except Exception:  # noqa: BLE001 - a callback must not break the reader
+                pass
 
     async def _abort(self) -> None:
         with contextlib.suppress(Exception):
@@ -782,6 +1032,77 @@ class AvatarCall:
     async def update(self, **session) -> None:
         """Change realtime settings during the call. The face is fixed: avatar fields get `avatar_locked`."""
         await self._send({"type": "session.update", "session": session})
+
+    # ------------------------------------------------------------------ lines (render modes)
+
+    def _need_mode(self, mode: str) -> None:
+        if self.mode != mode:
+            raise WrongMode("wrong_mode", "This is a %s call; that needs %s." % (self.mode, mode))
+
+    def _new_line(self, line_id: str | None, kind: str) -> Line:
+        if line_id is None:
+            self._seq += 1
+            line_id = "line-%d" % self._seq
+        if not isinstance(line_id, str) or not 1 <= len(line_id) <= 64:
+            raise LineError("invalid_line_id", "line_id must be a string of 1 to 64 characters.")
+        old = self.lines.get(line_id)
+        if old is not None and not old.done:
+            raise LineError("duplicate_line", "line_id %r is already in use." % line_id)
+        line = self.lines[line_id] = Line(self, line_id, kind)
+        return line
+
+    async def _line_event(self, line: Line, kind: str, **fields) -> None:
+        self._seq += 1
+        await self._send({"type": kind, "line_id": line.id, "event_id": "line:%s:%d" % (line.id, self._seq), **fields})
+
+    def start_line(self, line_id: str | None = None) -> Line:
+        """render-audio: begin a line (nothing is sent until its first `append`). `line_id` is yours (1 to 64
+        characters; lines play in the order of their first audio) or generated. Use it as
+        `async with call.start_line("a") as line: await line.append(pcm)`, or `await line.stream(iterator)`."""
+        self._need_mode("render-audio")
+        return self._new_line(line_id, "audio")
+
+    async def send_line(self, pcm: bytes, line_id: str | None = None, *, chunk_ms: int = 500) -> Line:
+        """render-audio: a whole line from audio you already have (PCM16 mono 24 kHz), sent in `chunk_ms`
+        pieces and ended. Returns the Line; `await line.wait()` for its end."""
+        line = self.start_line(line_id)
+        step = max(2, AUDIO_RATE * chunk_ms // 1000 * 2)
+        await line.stream(pcm[i:i + step] for i in range(0, len(pcm), step))
+        return line
+
+    async def speak(self, text: str, line_id: str | None = None, *, voice: str | None = None) -> Line:
+        """render-text: the exact text of a line (up to 2000 characters); Newera voices it and lip-syncs the
+        voice. Nothing is rewritten. `voice` picks the voice for this line (and the ones after it). Returns the Line."""
+        self._need_mode("render-text")
+        line = self._new_line(line_id, "text")
+        fields: dict = {"text": text}
+        if voice:
+            fields["voice"] = voice
+        await self._line_event(line, "avatar.line.text", **fields)
+        return line
+
+    async def interrupt(self) -> None:
+        """Stop now: queued audio is dropped, nothing rendered from it plays, and every open line ends with
+        `LineDone(status="interrupted")` (and an `Interrupted` event). Audio you had not sent yet is dropped
+        here: `line.append()` returns False and `line.stream()` stops. In conversational mode the reply is
+        cancelled too. Lines you start after this are not affected."""
+        for line in self.lines.values():
+            if line.done:
+                continue
+            line._cut = True
+            if not line._sent:                    # the server never heard of it: no `done` will come
+                line._finish("interrupted")
+        await self._send({"type": "avatar.interrupt"})
+
+    def on_line_started(self, callback: Callable[[LineStarted], Any]) -> Callable:
+        """Call `callback(LineStarted)` (a function or a coroutine function) at each `avatar.line.started`."""
+        self._line_callbacks["started"].append(callback)
+        return callback
+
+    def on_line_done(self, callback: Callable[[LineDone], Any]) -> Callable:
+        """Call `callback(LineDone)` at each `avatar.line.done` (completed, interrupted or failed)."""
+        self._line_callbacks["done"].append(callback)
+        return callback
 
     # -------------------------------------------------------------------- receive
 
