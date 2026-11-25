@@ -88,10 +88,10 @@ class Server:
 def test_defaults_are_h264_and_original_and_are_always_said(fake_av):
     async def go():
         async with Server() as srv:
-            async with srv.client().avatar.connect(mode="render-text", image=b"\xff\xd8photo") as call:
+            async with srv.client().avatar.connect(mode="render-text", image=b"\xff\xd8photo", transport="websocket") as call:
                 assert call.video_format == "h264" and call.ready.output == "original"
                 assert (call.ready.width, call.ready.height) == (1024, 1280)
-            assert srv.queries[0] == {"mode": "render-text", "video_format": "h264", "output": "original"}
+            assert srv.queries[0] == {"mode": "render-text", "video_format": "h264", "output": "original", "transport": "websocket"}
     run(go())
 
 
@@ -102,7 +102,7 @@ def test_square_and_jpeg_options_and_every_combination(fake_av):
             for output in ("original", "square"):
                 for fmt in ("h264", "jpeg"):
                     async with srv.client().avatar.connect(mode="render-audio", image=b"\xff\xd8photo", output=output,
-                                                           video_format=fmt) as call:
+                                                           video_format=fmt, transport="websocket") as call:
                         seen[(output, fmt)] = (call.ready.output, call.ready.video_format, call.ready.width, call.ready.height)
             assert seen == {("original", "h264"): ("original", "h264", 1024, 1280), ("original", "jpeg"): ("original", "jpeg", 1024, 1280),
                             ("square", "h264"): ("square", "h264", 512, 512), ("square", "jpeg"): ("square", "jpeg", 512, 512)}
@@ -114,7 +114,7 @@ def test_square_and_jpeg_options_and_every_combination(fake_av):
 def test_original_without_a_photo_is_served_square_and_the_reason_is_in_ready(fake_av):
     async def go():
         async with Server() as srv:
-            async with srv.client().avatar.connect("lama", mode="render-audio") as call:        # a preset face
+            async with srv.client().avatar.connect("lama", mode="render-audio", transport="websocket") as call:        # a preset face
                 r = call.ready
                 assert (r.output, r.output_reason, r.width, r.height) == ("square", "preset_face", 512, 512)
     run(go())
@@ -136,7 +136,7 @@ def test_ready_parses_output_and_reason_and_the_size():
 def test_unknown_values_are_value_errors_and_the_server_codes_map():
     c = Newera(api_key="k", base_url="http://127.0.0.1:1")
     with pytest.raises(ValueError, match="output"):
-        c.avatar.connect(output="circle")
+        c.avatar.connect(output="circle", transport="websocket")
     with pytest.raises(ValueError, match="output"):
         run(c.avatar.create_session(output="circle"))
     assert isinstance(error_for("invalid_output", close_code=4400), InvalidRequest)
@@ -146,11 +146,11 @@ def test_without_pyav_the_default_falls_back_to_jpeg_with_a_warning_but_h264_is_
     monkeypatch.setitem(sys.modules, "av", None)
     c = Newera(api_key="k", base_url="http://127.0.0.1:1")
     with pytest.warns(UserWarning, match="PyAV"):
-        conn = c.avatar.connect()
+        conn = c.avatar.connect(transport="websocket")
     assert conn.video_format == "jpeg" and conn.output == "original"
     from newera import AvatarError
     with pytest.raises(AvatarError) as e:
-        c.avatar.connect(video_format="h264")
+        c.avatar.connect(video_format="h264", transport="websocket")
     assert e.value.code == "av_not_installed"
 
 
@@ -171,7 +171,7 @@ def test_image_as_bytes_path_base64_and_data_url(tmp_path):
 def test_the_photo_goes_in_the_first_session_update(fake_av):
     async def go():
         async with Server() as srv:
-            async with srv.client().avatar.connect(mode="render-text", image=b"\xff\xd8photo"):
+            async with srv.client().avatar.connect(mode="render-text", image=b"\xff\xd8photo", transport="websocket"):
                 pass
             assert base64.b64decode(srv.sessions[0]["avatar_image"]) == b"\xff\xd8photo"
     run(go())
@@ -210,9 +210,9 @@ def test_create_session_passes_both_options_and_the_secret_keeps_them(fake_av):
             assert plain.output is None and "output" not in plain.as_dict()
             async with Server() as srv:
                 client = Newera(api_key=None, base_url=srv.base_url)
-                async with client.avatar.connect(client_secret=s, image=b"\xff\xd8photo"):
+                async with client.avatar.connect(client_secret=s, image=b"\xff\xd8photo", transport="websocket"):
                     pass
-                async with client.avatar.connect(client_secret=plain, image=b"\xff\xd8photo"):
+                async with client.avatar.connect(client_secret=plain, image=b"\xff\xd8photo", transport="websocket"):
                     pass
                 assert (srv.queries[0]["output"], srv.queries[0]["video_format"]) == ("square", "jpeg")   # the secret's
                 assert (srv.queries[1]["output"], srv.queries[1]["video_format"]) == ("original", "h264")  # the defaults

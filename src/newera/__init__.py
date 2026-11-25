@@ -8,7 +8,8 @@ from .avatar import (AudioDelta, Availability, AvatarBusy, AvatarCall, AvatarErr
                      AvatarReply, AvatarUnavailable, AuthenticationError, CallTimeLimit, ClientSecret, ErrorEvent,
                      InsufficientQuota, Interrupted, InvalidRequest, Line, LineDone, LineError, LineStarted, NotEnabled, OtherEvent, RateLimited,
                      ReplyText, ReplyTextDelta, ResponseDone, SessionSummary, SpeechStarted, SpeechStopped,
-                     Timeline, Unavailable, UserTranscript, VideoChunk, WrongMode)
+                     Timeline, TransportUnavailable, Unavailable, UserTranscript, VideoChunk, WrongMode, WrongTransport,
+                     LiveKitRoom, DEFAULT_TRANSPORT, TRANSPORTS)
 from .client import Newera
 from .h264 import DecodedFrame, H264Decoder
 from .player import LipSyncPlayer
@@ -30,5 +31,5 @@ __all__ = ["VoiceAgent", "Call", "Event", "Reply", "ToolSpec", "NeweraError", "D
            "ErrorEvent", "OtherEvent",
            "AvatarError", "InvalidRequest", "AuthenticationError", "InsufficientQuota", "NotEnabled",
            "CallTimeLimit", "RateLimited", "AvatarBusy", "AvatarUnavailable",
-           "WrongMode", "LineError", "Line", "LineStarted", "LineDone", "LipSyncPlayer", "H264Decoder", "DecodedFrame"]
-__version__ = "0.5.0"
+           "WrongMode", "WrongTransport", "TransportUnavailable", "LiveKitRoom", "DEFAULT_TRANSPORT", "TRANSPORTS", "LineError", "Line", "LineStarted", "LineDone", "LipSyncPlayer", "H264Decoder", "DecodedFrame"]
+__version__ = "0.6.0"

@@ -128,7 +128,7 @@ $("connect").onclick = () => {
   actx = actx || new AudioContext({ sampleRate: RATE });  // created in a click: browsers allow audio then
   actx.resume();
   say("Connecting...");
-  ws = new WebSocket("wss://api.newera.ai/v1/avatar?mode=render-audio&video_format=h264", ["realtime", "newera-client-secret." + secret]);
+  ws = new WebSocket("wss://api.newera.ai/v1/avatar?mode=render-audio&video_format=h264&transport=websocket", ["realtime", "newera-client-secret." + secret]);
   ws.onopen = () => send({ type: "session.update", session: { avatar: "lama" } });
   ws.onmessage = m => {
     const ev = JSON.parse(m.data);

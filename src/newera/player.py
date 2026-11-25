@@ -32,14 +32,20 @@ import concurrent.futures
 import time
 from typing import Any, AsyncIterator, Callable
 
-from .avatar import AUDIO_RATE, AvatarEvent, Interrupted, VideoChunk
+from .avatar import AUDIO_RATE, AvatarEvent, Interrupted, VideoChunk, _need_socket_media
 
 
 class LipSyncPlayer:
     def __init__(self, play_audio: Callable[[bytes], Any], show_frame: Callable[[bytes, int], Any], *,
                  flush_audio: Callable[[], Any] | None = None, buffer_ms: float = 250, audio_lead_ms: float = 60,
                  max_late_ms: float = 120, show_idle: bool = True, clock: Callable[[], float] = time.monotonic,
-                 request_keyframe: Callable[[], Any] | None = None, frame_format: str = "auto", decoder: Any = None):
+                 request_keyframe: Callable[[], Any] | None = None, frame_format: str = "auto", decoder: Any = None,
+                 call: Any = None):
+        # The player plays video chunks from the socket. A livekit call has none (its video is in the LiveKit room),
+        # so say so now instead of playing nothing. `call` is the AvatarCall; `call.request_keyframe` also names it.
+        call = call if call is not None else getattr(request_keyframe, "__self__", None)
+        if getattr(call, "transport", None) == "livekit":
+            _need_socket_media("livekit", "LipSyncPlayer")
         if frame_format not in ("auto", "jpeg"):
             raise ValueError('frame_format must be "auto" or "jpeg", not %r' % (frame_format,))
         self.play_audio, self.show_frame, self.flush_audio = play_audio, show_frame, flush_audio
