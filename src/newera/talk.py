@@ -151,7 +151,8 @@ async def _drive(opts: dict, player: Playback, status: Status, stop: asyncio.Eve
                 opts.get("avatar") or "lama", voice=opts.get("voice") or "female", language=opts.get("language"),
                 model=opts.get("model") or "newera-s2s", image=opts.get("image"), idle_video=bool(opts.get("idle_video")),
                 instructions=opts.get("instructions"), record=bool(opts.get("record")),
-                video_format=opts.get("video_format"), output=opts.get("output")) as call:
+                video_format=opts.get("video_format"), output=opts.get("output"),
+                transport="websocket") as call:      # the window plays the frames, so they must be on the socket
             loop = asyncio.get_running_loop()
             if not opts.get("mute"):
                 out_stream = _open_output(player)

@@ -27,6 +27,7 @@ async def main(args):
     async with client.avatar.connect(avatar="lama", voice=args.voice, record=True, image=args.image,
                                      output="square" if args.square else "original",
                                      video_format="jpeg" if args.jpeg else "h264",
+                                     transport="websocket",      # the video chunks on the socket, to save the MP4
                                      instructions="You are a friendly assistant. Answer in one or two short sentences.") as call:
         if args.text:
             await call.send_text(args.text)

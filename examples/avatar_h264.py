@@ -28,9 +28,10 @@ async def pieces(pcm: bytes, ms: int = 200):
 
 async def main(args):
     client = Newera()                                # NEWERA_API_KEY from the environment
+    # transport="websocket": the video chunks arrive on the socket, which is what record and save_mp4 need.
     # video_format="h264" fails right here, before any call, when PyAV is not installed.
     async with client.avatar.connect(avatar="lama", mode="render-audio", video_format="h264", output="square",
-                                     record=True) as call:
+                                     record=True, transport="websocket") as call:
         print("codec", call.ready.video["codec"], "keyframe every", call.ready.video["gop_frames"], "frames")
         stats = {"bytes": 0, "frames": 0, "keyframes": 0}
 

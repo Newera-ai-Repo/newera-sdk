@@ -134,29 +134,29 @@ def test_jpeg_url_and_session_without_pyav(monkeypatch):
     async def go():
         async with FakeServer(h264=False) as srv:
             with pytest.warns(UserWarning, match="PyAV"):             # no PyAV and no choice made: JPEG, said once
-                async with srv.client().avatar.connect(mode="render-audio") as call:
+                async with srv.client().avatar.connect(mode="render-audio", transport="websocket") as call:
                     assert call.video_format == "jpeg" and call.ready.video is None
-            async with srv.client().avatar.connect(video_format="jpeg") as call:
+            async with srv.client().avatar.connect(video_format="jpeg", transport="websocket") as call:
                 pass
             with pytest.warns(UserWarning, match="PyAV"):
-                async with srv.client().avatar.connect() as call:
+                async with srv.client().avatar.connect(transport="websocket") as call:
                     pass
-            assert srv.paths == ["/v1/avatar?mode=render-audio&video_format=jpeg&output=original",
-                                 "/v1/avatar?model=newera-s2s&video_format=jpeg&output=original",
-                                 "/v1/avatar?model=newera-s2s&video_format=jpeg&output=original"]
+            assert srv.paths == ["/v1/avatar?mode=render-audio&video_format=jpeg&output=original&transport=websocket",
+                                 "/v1/avatar?model=newera-s2s&video_format=jpeg&output=original&transport=websocket",
+                                 "/v1/avatar?model=newera-s2s&video_format=jpeg&output=original&transport=websocket"]
     run(go())
 
 
 def test_h264_option_goes_into_the_url_and_ready_carries_the_video_dict(fake_av):
     async def go():
         async with FakeServer() as srv:
-            async with srv.client().avatar.connect(mode="render-audio", video_format="h264") as call:
+            async with srv.client().avatar.connect(mode="render-audio", video_format="h264", transport="websocket") as call:
                 assert call.video_format == "h264" and isinstance(call.ready, AvatarReady)
                 assert call.ready.video["codec"] == "avc1.4D401F" and call.ready.video["gop_frames"] == 50
-            async with srv.client().avatar.connect(video_format="h264"):
+            async with srv.client().avatar.connect(video_format="h264", transport="websocket"):
                 pass
-            assert srv.paths == ["/v1/avatar?mode=render-audio&video_format=h264&output=original",
-                                 "/v1/avatar?model=newera-s2s&video_format=h264&output=original"]
+            assert srv.paths == ["/v1/avatar?mode=render-audio&video_format=h264&output=original&transport=websocket",
+                                 "/v1/avatar?model=newera-s2s&video_format=h264&output=original&transport=websocket"]
     run(go())
 
 
@@ -169,16 +169,16 @@ def test_h264_with_a_client_secret_keeps_the_option_in_the_url(fake_av):
             secret = ClientSecret("avs_q", 1, "newera-s2s", "render-audio", "h264")
             assert secret.as_dict()["video_format"] == "h264"
             assert "video_format" not in ClientSecret("avs_q", 1, "newera-s2s").as_dict()
-            async with client.avatar.connect(client_secret=secret):
+            async with client.avatar.connect(client_secret=secret, transport="websocket"):
                 pass
-            assert srv.paths == ["/v1/avatar?mode=render-audio&video_format=h264&output=original"]
+            assert srv.paths == ["/v1/avatar?mode=render-audio&video_format=h264&output=original&transport=websocket"]
     run(go())
 
 
 def test_unknown_video_format_is_a_value_error():
     c = Newera(api_key="k")
     with pytest.raises(ValueError):
-        c.avatar.connect(video_format="vp9")
+        c.avatar.connect(video_format="vp9", transport="websocket")
     with pytest.raises(ValueError):
         run(c.avatar.create_session(video_format="vp9"))
 
@@ -187,7 +187,7 @@ def test_missing_pyav_is_a_clear_error_before_any_connection(monkeypatch):
     monkeypatch.setitem(sys.modules, "av", None)
     c = Newera(api_key="k", base_url="http://127.0.0.1:1")              # nothing listens here: it must not be tried
     with pytest.raises(AvatarError) as e:
-        c.avatar.connect(video_format="h264")
+        c.avatar.connect(video_format="h264", transport="websocket")
     assert e.value.code == "av_not_installed" and "pip install av" in e.value.message
 
 
@@ -201,7 +201,7 @@ def test_server_refusal_of_h264_is_typed(fake_av):
     async def go():
         async with FakeServer(refuse=("video_format_unavailable", 4503)) as srv:
             with pytest.raises(AvatarUnavailable) as e:
-                async with srv.client().avatar.connect(video_format="h264"):
+                async with srv.client().avatar.connect(video_format="h264", transport="websocket"):
                     pass
             assert e.value.code == "video_format_unavailable" and e.value.close_code == 4503
     run(go())
@@ -539,7 +539,7 @@ def test_call_h264_events_keyframe_request_and_raw_save(fake_av, tmp_path):
 
     async def go():
         async with FakeServer(events=[ev0, ev1]) as srv:
-            async with srv.client().avatar.connect(mode="render-audio", video_format="h264", record=True) as call:
+            async with srv.client().avatar.connect(mode="render-audio", video_format="h264", record=True, transport="websocket") as call:
                 got = []
                 line = call.start_line("a")
                 await line.append(bytes(FRAME_BYTES * 14))
@@ -565,7 +565,7 @@ def test_call_h264_events_keyframe_request_and_raw_save(fake_av, tmp_path):
 def test_request_keyframe_is_harmless_on_a_jpeg_call(monkeypatch):
     async def go():
         async with FakeServer(h264=False) as srv:
-            async with srv.client().avatar.connect() as call:
+            async with srv.client().avatar.connect(transport="websocket") as call:
                 await call.request_keyframe()
                 await call.close()
             assert all(e["type"] != "avatar.video.keyframe" for e in srv.received)
@@ -781,7 +781,7 @@ def test_av_save_mp4_through_a_call_and_save_frames(tmp_path):
 
     async def go():
         async with FakeServer(events=[h264_event(c.frame_index, c.units, c.keyframes) for c in chunks_of(enc)]) as srv:
-            async with srv.client().avatar.connect(mode="render-audio", video_format="h264", record=True) as call:
+            async with srv.client().avatar.connect(mode="render-audio", video_format="h264", record=True, transport="websocket") as call:
                 line = call.start_line("a")
                 await line.append(bytes(FRAME_BYTES * 12))
                 await line.end()

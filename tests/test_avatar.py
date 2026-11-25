@@ -25,7 +25,7 @@ def bare(path):
     """A request path without the video_format and output options (every call sends them, see test_avatar_output.py)."""
     from urllib.parse import parse_qsl, urlencode, urlsplit
     u = urlsplit(path)
-    q = [(k, v) for k, v in parse_qsl(u.query) if k not in ("video_format", "output")]
+    q = [(k, v) for k, v in parse_qsl(u.query) if k not in ("video_format", "output", "transport")]
     return u.path + ("?" + urlencode(q) if q else "")
 
 
@@ -170,11 +170,11 @@ def test_build_session_defaults_and_options(tmp_path):
 def test_bad_arguments_raise_before_connecting():
     client = Newera(api_key="k")
     with pytest.raises(ValueError):
-        client.avatar.connect(model="gpt")
+        client.avatar.connect(model="gpt", transport="websocket")
     with pytest.raises(ValueError):
-        client.avatar.connect(voice="robot")
+        client.avatar.connect(voice="robot", transport="websocket")
     with pytest.raises(ValueError):
-        client.avatar.connect(language="fr")
+        client.avatar.connect(language="fr", transport="websocket")
 
 
 def test_ws_url_from_base_url():
@@ -188,7 +188,7 @@ def test_call_sends_session_update_first_and_gets_typed_events():
     async def go():
         async with FakeAvatar() as srv:
             async with client_for(srv).avatar.connect("lama", voice="male", language="en", model="newera-s2s-mini",
-                                                       record=True, instructions="be brief") as call:
+                                                       record=True, instructions="be brief", transport="websocket") as call:
                 assert bare(srv.paths[0]) == "/v1/avatar?model=newera-s2s-mini"
                 assert srv.headers[0]["authorization"] == "Bearer nwc_test"
                 assert call.ready.frames_per_event == 7 and call.session["id"] == "sess_1"
@@ -218,7 +218,7 @@ def test_call_sends_session_update_first_and_gets_typed_events():
 def test_events_iterator_ends_when_call_closes():
     async def go():
         async with FakeAvatar(chunks=1) as srv:
-            async with client_for(srv).avatar.connect() as call:
+            async with client_for(srv).avatar.connect(transport="websocket") as call:
                 await call.say("greet")
                 kinds = []
                 async for ev in call.events():
@@ -232,7 +232,7 @@ def test_events_iterator_ends_when_call_closes():
 def test_frames_and_audio_helpers():
     async def go():
         async with FakeAvatar(chunks=2) as srv:
-            async with client_for(srv).avatar.connect() as call:
+            async with client_for(srv).avatar.connect(transport="websocket") as call:
                 await call.say("greet")
                 got = []
                 async for index, jpeg in call.frames():
@@ -246,7 +246,7 @@ def test_frames_and_audio_helpers():
 def test_not_recorded_call_cannot_save():
     async def go():
         async with FakeAvatar() as srv:
-            async with client_for(srv).avatar.connect() as call:
+            async with client_for(srv).avatar.connect(transport="websocket") as call:
                 with pytest.raises(RuntimeError, match="record=True"):
                     call.save_mp4("x.mp4")
     run(go())
@@ -278,7 +278,7 @@ def test_send_file_resamples_and_paces(tmp_path):
 
     async def go():
         async with FakeAvatar() as srv:
-            async with client_for(srv).avatar.connect() as call:
+            async with client_for(srv).avatar.connect(transport="websocket") as call:
                 t0 = asyncio.get_running_loop().time()
                 await call.send_file(path, tail=0.1, keep_silence=False)
                 took = asyncio.get_running_loop().time() - t0
@@ -353,7 +353,7 @@ def test_connect_with_client_secret_sends_subprotocol_and_no_key(monkeypatch):
         async with FakeAvatar() as srv:
             client = Newera(api_key=None, base_url=srv.base_url)
             from newera import ClientSecret
-            async with client.avatar.connect(client_secret=ClientSecret("avs_xyz", 1, "newera-s2s")):
+            async with client.avatar.connect(client_secret=ClientSecret("avs_xyz", 1, "newera-s2s"), transport="websocket"):
                 pass
             assert srv.protocols[0] == "realtime, newera-client-secret.avs_xyz"
             assert "authorization" not in srv.headers[0]
@@ -386,7 +386,7 @@ def test_refused_connection_raises_matching_error(code, close, cls):
     async def go():
         async with FakeAvatar(refuse=(code, close)) as srv:
             with pytest.raises(cls) as e:
-                async with client_for(srv).avatar.connect():
+                async with client_for(srv).avatar.connect(transport="websocket"):
                     pass
             assert e.value.code == code and e.value.close_code == close
             assert isinstance(e.value, NeweraError)
@@ -480,7 +480,7 @@ def test_cli_busy_message(monkeypatch, capsys, http):
 def test_wait_reply_keeps_collecting_video_that_arrives_after_response_done():
     async def go():
         async with FakeAvatar(chunks=3, video_delay=1.0) as srv:
-            async with client_for(srv).avatar.connect() as call:
+            async with client_for(srv).avatar.connect(transport="websocket") as call:
                 await call.send_text("hello")
                 reply = await call.wait_reply(quiet=1.5)
                 assert len(reply.chunks) == 3 and len(reply.frames) == 21

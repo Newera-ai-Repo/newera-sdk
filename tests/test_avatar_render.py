@@ -22,7 +22,7 @@ def bare(path):
     """A request path without the video_format and output options (every call sends them, see test_avatar_output.py)."""
     from urllib.parse import parse_qsl, urlencode, urlsplit
     u = urlsplit(path)
-    q = [(k, v) for k, v in parse_qsl(u.query) if k not in ("video_format", "output")]
+    q = [(k, v) for k, v in parse_qsl(u.query) if k not in ("video_format", "output", "transport")]
     return u.path + ("?" + urlencode(q) if q else "")
 
 
@@ -192,7 +192,7 @@ def test_error_mapping_including_retry_after():
 def test_render_audio_line_streams_audio_and_reports_events():
     async def go():
         async with FakeRender() as srv:
-            async with client_for(srv).avatar.connect("lama", mode="render-audio", idle_video=True) as call:
+            async with client_for(srv).avatar.connect("lama", mode="render-audio", idle_video=True, transport="websocket") as call:
                 assert bare(srv.paths[0]) == "/v1/avatar?mode=render-audio"           # no model in a render mode
                 assert srv.received[0] == {"type": "session.update",
                                            "session": {"avatar": "lama", "avatar_idle_video": True}}
@@ -227,7 +227,7 @@ def test_render_audio_line_streams_audio_and_reports_events():
 def test_send_line_one_shot_and_async_with():
     async def go():
         async with FakeRender() as srv:
-            async with client_for(srv).avatar.connect(mode="render-audio") as call:
+            async with client_for(srv).avatar.connect(mode="render-audio", transport="websocket") as call:
                 pcm = bytes(FRAME_BYTES * 7)
                 one = await call.send_line(pcm, "one", chunk_ms=100)
                 assert await one.wait(5) == "completed"
@@ -245,7 +245,7 @@ def test_send_line_one_shot_and_async_with():
 def test_render_text_sends_exact_text_and_voice():
     async def go():
         async with FakeRender() as srv:
-            async with client_for(srv).avatar.connect(mode="render-text") as call:
+            async with client_for(srv).avatar.connect(mode="render-text", transport="websocket") as call:
                 assert bare(srv.paths[0]) == "/v1/avatar?mode=render-text"
                 assert "voice" not in srv.received[0]["session"]
                 a = await call.speak("مرحبا, welcome!", "t1", voice="female")
@@ -262,11 +262,11 @@ def test_render_text_sends_exact_text_and_voice():
 def test_audio_methods_refused_in_render_text_and_the_reverse():
     async def go():
         async with FakeRender() as srv:
-            async with client_for(srv).avatar.connect(mode="render-audio") as call:
+            async with client_for(srv).avatar.connect(mode="render-audio", transport="websocket") as call:
                 with pytest.raises(WrongMode):
                     await call.speak("hi")
             # the server's own refusal of a line event of the wrong mode is typed too
-            async with client_for(srv).avatar.connect(mode="render-text") as call:
+            async with client_for(srv).avatar.connect(mode="render-text", transport="websocket") as call:
                 line = call._new_line("raw", "audio")
                 await line.append(b"\0\0")
                 assert await line.wait(5) == "failed"
@@ -278,7 +278,7 @@ def test_audio_methods_refused_in_render_text_and_the_reverse():
 def test_failed_and_refused_lines_are_typed():
     async def go():
         async with FakeRender() as srv:
-            async with client_for(srv).avatar.connect(mode="render-text") as call:
+            async with client_for(srv).avatar.connect(mode="render-text", transport="websocket") as call:
                 bad = await call.speak("FAIL", "f1")
                 assert await bad.wait(5) == "failed"
                 with pytest.raises(AvatarError) as e:
@@ -299,7 +299,7 @@ def test_failed_and_refused_lines_are_typed():
 def test_interrupt_drops_unsent_audio_and_ends_open_lines():
     async def go():
         async with FakeRender() as srv:
-            async with client_for(srv).avatar.connect(mode="render-audio") as call:
+            async with client_for(srv).avatar.connect(mode="render-audio", transport="websocket") as call:
                 pcm = bytes(FRAME_BYTES * 7)
                 hold = call.start_line("hold")
                 await hold.append(pcm)
@@ -332,7 +332,7 @@ def test_interrupt_drops_unsent_audio_and_ends_open_lines():
 def test_interrupt_in_render_text():
     async def go():
         async with FakeRender() as srv:
-            async with client_for(srv).avatar.connect(mode="render-text") as call:
+            async with client_for(srv).avatar.connect(mode="render-text", transport="websocket") as call:
                 line = await call.speak("hold", "h")
                 await call.interrupt()
                 assert await line.wait(5) == "interrupted"
@@ -346,7 +346,7 @@ def test_avatar_busy_has_retry_after(mode):
     async def go():
         async with FakeRender(refuse=("avatar_busy", 4503, {"retry_after_s": 9})) as srv:
             with pytest.raises(AvatarBusy) as e:
-                async with client_for(srv).avatar.connect(mode=mode):
+                async with client_for(srv).avatar.connect(mode=mode, transport="websocket"):
                     pass
             assert e.value.retry_after_s == 9 and e.value.close_code == 4503 and e.value.code == "avatar_busy"
     run(go())
@@ -359,7 +359,7 @@ def test_entitlement_credit_and_limit_errors(code, close, cls):
     async def go():
         async with FakeRender(refuse=(code, close, {})) as srv:
             with pytest.raises(cls) as e:
-                async with client_for(srv).avatar.connect(mode="render-text"):
+                async with client_for(srv).avatar.connect(mode="render-text", transport="websocket"):
                     pass
             assert e.value.code == code and e.value.close_code == close
     run(go())
@@ -368,7 +368,7 @@ def test_entitlement_credit_and_limit_errors(code, close, cls):
 def test_dropped_call_fails_open_lines():
     async def go():
         async with FakeRender(drop_after_first=True) as srv:
-            async with client_for(srv).avatar.connect(mode="render-audio") as call:
+            async with client_for(srv).avatar.connect(mode="render-audio", transport="websocket") as call:
                 await call.send_line(bytes(FRAME_BYTES * 7), "a")
                 b = call.start_line("b")
                 await b.append(bytes(FRAME_BYTES))
@@ -382,16 +382,16 @@ def test_render_modes_reject_conversation_options_and_bad_mode():
     c = Newera(api_key="k")
     for kw in ({"instructions": "x"}, {"language": "ar"}, {"model": "newera-s2s-mini"}, {"turn_detection": None}):
         with pytest.raises(ValueError):
-            c.avatar.connect(mode="render-text", **kw)
+            c.avatar.connect(mode="render-text", **kw, transport="websocket")
     with pytest.raises(ValueError):
-        c.avatar.connect(mode="video")
+        c.avatar.connect(mode="video", transport="websocket")
 
 
 def test_client_secret_flow_for_render_mode():
     async def go():
         async with FakeRender() as srv:
             client = Newera(api_key=None, base_url=srv.base_url)
-            async with client.avatar.connect(client_secret=ClientSecret("avs_q", 1, "newera-s2s", "render-text")) as call:
+            async with client.avatar.connect(client_secret=ClientSecret("avs_q", 1, "newera-s2s", "render-text"), transport="websocket") as call:
                 assert call.mode == "render-text"
             assert srv.protocols[0] == "realtime, newera-client-secret.avs_q"
             assert bare(srv.paths[0]) == "/v1/avatar?mode=render-text" and "authorization" not in srv.headers[0]

@@ -3,19 +3,24 @@
     from newera import Newera
 
     client = Newera(api_key="nwc_live_...")
-    async with client.avatar.connect(avatar="lama", voice="female", record=True) as call:
+    async with client.avatar.connect(avatar="lama", mode="render-text") as call:     # transport="livekit" (default)
+        print(call.livekit.url, call.livekit.token)   # a browser or app joins this LiveKit room and plays the avatar
+        line = await call.speak("Welcome.")
+        await line.wait()
+
+    async with client.avatar.connect(avatar="lama", voice="female", record=True, transport="websocket") as call:
         await call.send_file("question.wav")          # the caller's turn, streamed in real time
         reply = await call.wait_reply()
         print(reply.text)
-        call.save_mp4("reply.mp4")                    # JPEG frames and their audio, muxed with ffmpeg
+        call.save_mp4("reply.mp4")                    # the video chunks received on the socket, muxed
 
-You stream the caller's audio in (PCM16 mono 24 kHz); you get back the assistant's speech as video: JPEG
-frames at 25 fps each paired with the audio of exactly those frames, plus the transcripts. This module
-is the protocol (`wss://api.newera.ai/v1/avatar`): typed events, errors mapped to exceptions, the
-client-secret flow for browsers, and a recorder. `newera avatar` (see talk.py) plays it live.
+You stream the caller's audio in (PCM16 mono 24 kHz); you get back the assistant's speech as video with its audio,
+plus the transcripts. With `transport="livekit"` (the default) the video and audio are published in a LiveKit room for
+a browser or mobile app to play, and the socket carries only your commands and the events. With
+`transport="websocket"` the video arrives on the socket: JPEG frames or H.264 units at 25 fps, each paired with the
+audio of exactly those frames. This module is the protocol (`wss://api.newera.ai/v1/avatar`): typed events, errors
+mapped to exceptions, the client-secret flow for browsers, and a recorder. `newera avatar` (see talk.py) plays it live.
 """
-
-from __future__ import annotations
 
 import asyncio
 import base64
@@ -46,6 +51,8 @@ MODES = ("conversational", "render-audio", "render-text")
 VOICES = ("male", "female")
 VIDEO_FORMATS = ("h264", "jpeg")
 OUTPUTS = ("original", "square")
+TRANSPORTS = ("livekit", "websocket")
+DEFAULT_TRANSPORT = "livekit"       # media in a LiveKit room; "websocket" puts the video chunks on the socket
 DEFAULT_VIDEO_FORMAT = "h264"
 DEFAULT_OUTPUT = "original"
 FPS = 25
@@ -110,6 +117,16 @@ class AvatarUnavailable(AvatarError):
     this gateway cannot produce H.264 right now (connect again with the default JPEG)."""
 
 
+class WrongTransport(AvatarError):
+    """The call uses the LiveKit transport, so the video and its audio are in the LiveKit room and not on the
+    socket. The API you used needs them on the socket: connect with `transport="websocket"`."""
+
+
+class TransportUnavailable(AvatarUnavailable):
+    """transport_unavailable (503): the LiveKit transport is not available right now. Connect again with
+    `transport="websocket"`, or retry later."""
+
+
 _BY_CODE = {
     "invalid_avatar": InvalidRequest, "invalid_avatar_image": InvalidRequest, "invalid_model": InvalidRequest,
     "invalid_api_key": AuthenticationError, "invalid_client_secret": AuthenticationError,
@@ -120,6 +137,8 @@ _BY_CODE = {
     "avatar_busy": AvatarBusy, "avatar_unavailable": AvatarUnavailable, "model_unavailable": AvatarUnavailable,
     "avatar_concurrency_limit": RateLimited, "session_time_limit": CallTimeLimit,
     "invalid_mode": InvalidRequest, "wrong_mode": WrongMode,
+    "invalid_transport": InvalidRequest, "transport_unavailable": TransportUnavailable,
+    "avatar_render_stalled": AvatarUnavailable, "wrong_transport": WrongTransport,
     "invalid_video_format": InvalidRequest, "invalid_output": InvalidRequest, "video_format_unavailable": AvatarUnavailable,
     "invalid_line_id": LineError, "duplicate_line": LineError, "too_many_lines": LineError,
     "line_too_long": LineError, "invalid_audio": LineError, "invalid_text": LineError, "text_too_long": LineError,
@@ -150,6 +169,33 @@ class AvatarEvent:
 
 
 @dataclasses.dataclass
+class LiveKitRoom:
+    """The LiveKit room of a call made with `transport="livekit"` (`call.livekit`). Hand `url` and `token` to the
+    page or app that shows the avatar: `await room.connect(url, token)` with any LiveKit client SDK, then play
+    the avatar's video and audio tracks. The token is for this room and one viewer, and has to be used within
+    10 minutes. Line events are also sent in the room as data messages on `data_topics["events"]`."""
+    url: str = ""
+    token: str = dataclasses.field(default="", repr=False)
+    room: str = ""
+    identity: str = ""
+    avatar_identity: str = ""           # the participant that publishes the avatar's tracks
+    video: dict = dataclasses.field(default_factory=dict)         # {"codec": "h264", "width": 512, "height": 512, "fps": 25}
+    audio: dict = dataclasses.field(default_factory=dict)         # {"sample_rate": 24000, "channels": 1}
+    data_topics: dict = dataclasses.field(default_factory=dict)   # {"events": "avatar.event", "control": "avatar.control"}
+
+
+def parse_livekit(data: Any) -> LiveKitRoom | None:
+    """The `livekit` object of `avatar.ready` as a LiveKitRoom (None when it is missing)."""
+    if not isinstance(data, dict) or not data:
+        return None
+    return LiveKitRoom(url=str(data.get("url") or ""), token=str(data.get("token") or ""),
+                       room=str(data.get("room") or ""), identity=str(data.get("identity") or ""),
+                       avatar_identity=str(data.get("avatar_identity") or ""),
+                       video=dict(data.get("video") or {}), audio=dict(data.get("audio") or {}),
+                       data_topics=dict(data.get("data_topics") or {}))
+
+
+@dataclasses.dataclass
 class AvatarReady(AvatarEvent):
     """The face has started (sent once, before session.created)."""
     fps: int = FPS
@@ -162,6 +208,8 @@ class AvatarReady(AvatarEvent):
     video: dict | None = None           # h264 only: {"codec": "avc1.4D401F", "stream": "annexb", "gop_frames": 50, ...}
     output: str = "square"              # the output the call really has: "original" (your photo's size) or "square" (512 x 512)
     output_reason: str | None = None    # why "original" was not possible, when you asked for it and got "square"
+    transport: str = "websocket"        # "livekit": the media is in the LiveKit room (`livekit`), video_format is "webrtc"
+    livekit: LiveKitRoom | None = None  # the room to join, with transport "livekit"
 
 
 @dataclasses.dataclass
@@ -355,7 +403,9 @@ def parse_event(data: dict) -> AvatarEvent:
                            frames_per_event=int(data.get("frames_per_event") or 7),
                            output=data.get("output") or "square", output_reason=data.get("output_reason"),
                            mode=data.get("mode") or "conversational",
-                           video=data.get("video") if isinstance(data.get("video"), dict) else None)
+                           video=data.get("video") if isinstance(data.get("video"), dict) else None,
+                           transport=data.get("transport") or ("livekit" if data.get("video_format") == "webrtc" else "websocket"),
+                           livekit=parse_livekit(data.get("livekit")))
     if t == "avatar.interrupted":
         return Interrupted(raw=data)
     if t == "avatar.unavailable":
@@ -606,21 +656,33 @@ class AvatarReply:
     events: list = dataclasses.field(default_factory=list, repr=False)
     first_text_s: float | None = None       # seconds after the question audio ended (send_file) ...
     first_video_s: float | None = None      # ... until the first reply text and the first reply video
+    transport: str = "websocket"            # "livekit": there are no frames, units or audio here (they are in the room)
 
     @property
     def frames(self) -> list:
-        """All the reply's JPEG frames, in order."""
+        """All the reply's JPEG frames, in order (WrongTransport on a livekit call)."""
+        _need_socket_media(self.transport, "reply.frames")
         return [f for c in self.chunks if c.speech for f in c.frames]
 
     @property
     def units(self) -> list:
-        """All the reply's h264 access units, in order (empty for a JPEG call)."""
+        """All the reply's h264 access units, in order (empty for a JPEG call; WrongTransport on a livekit call)."""
+        _need_socket_media(self.transport, "reply.units")
         return [u for c in self.chunks if c.speech for u in c.units]
 
     @property
     def audio(self) -> bytes:
-        """All the reply's audio: PCM16 mono 24 kHz."""
+        """All the reply's audio: PCM16 mono 24 kHz (WrongTransport on a livekit call)."""
+        _need_socket_media(self.transport, "reply.audio")
         return b"".join(c.audio for c in self.chunks if c.speech and c.audio)
+
+
+def _need_socket_media(transport: str, what: str) -> None:
+    """Raise WrongTransport when `what` needs video or audio on the socket and the call is a livekit call."""
+    if transport == "livekit":
+        raise WrongTransport("wrong_transport", "%s needs the video on the socket, but this call uses the LiveKit "
+                             "transport (the video and audio are in the LiveKit room: see call.livekit). Connect with "
+                             "transport=\"websocket\" to use it." % what)
 
 
 # ------------------------------------------------------------------------------------------- audio
@@ -673,6 +735,7 @@ class ClientSecret:
     mode: str = "conversational"
     video_format: str | None = None     # what the secret was made for; None = the server's default (h264)
     output: str | None = None           # likewise: None = the server's default (original)
+    transport: str | None = None        # "livekit" or "websocket" as asked for; None = not said (the server's default)
 
     def as_dict(self) -> dict:
         d = {"client_secret": {"value": self.value, "expires_at": self.expires_at}, "model": self.model}
@@ -682,6 +745,8 @@ class ClientSecret:
             d["video_format"] = self.video_format
         if self.output:
             d["output"] = self.output
+        if self.transport:
+            d["transport"] = self.transport
         return d
 
 
@@ -708,14 +773,22 @@ class Avatar:
         return Availability(busy=bool(data.get("busy")), available=bool(data.get("available", True)))
 
     async def create_session(self, model: str = "newera-s2s", *, mode: str = "conversational",
-                             video_format: str | None = None, output: str | None = None) -> ClientSecret:
+                             video_format: str | None = None, output: str | None = None,
+                             transport: str | None = None) -> ClientSecret:
         """Trade the API key for a client secret (`avs_...`, one use, 60 seconds) that a browser opens the
         WebSocket with; call it from your server, never from a page. `mode` is checked against your
         entitlements now (the page still opens the socket with `?mode=` itself). `model` is for conversational.
         `video_format` ("h264" or "jpeg") and `output` ("original" or "square") are checked now and kept in the
         secret as the socket's defaults (the page may still pass `&video_format=` / `&output=` itself); left out,
-        the server's defaults apply (h264, original)."""
+        the server's defaults apply (h264, original).
+
+        `transport` ("livekit" or "websocket") is checked now and bound into the secret. Left out, nothing is said and
+        the server's default (websocket) applies to a page that does not pass `&transport=` itself; pass
+        `transport="livekit"` for a page that shows the avatar with the LiveKit client SDK. A `transport_unavailable`
+        error means the LiveKit transport is not available right now."""
         _check_mode(mode)
+        if transport is not None:
+            _check_transport(transport)
         if video_format is not None:
             _check_video_format(video_format)
         if output is not None:
@@ -730,19 +803,22 @@ class Avatar:
             body["video_format"] = video_format
         if output is not None:
             body["output"] = output
+        if transport is not None:
+            body["transport"] = transport
         data = await asyncio.to_thread(self._client._http, "POST", "/v1/avatar/sessions", body)
         secret = data.get("client_secret") or {}
         if not secret.get("value"):
             raise AvatarError("invalid_response", "The server did not return a client secret.")
         return ClientSecret(value=secret["value"], expires_at=int(secret.get("expires_at") or 0),
                             model=data.get("model") or model, mode=data.get("mode") or mode,
-                            video_format=video_format, output=output)
+                            video_format=video_format, output=output, transport=transport)
 
     def connect(self, avatar: str = "lama", *, voice: str = "female", language: str | None = None,
                 model: str = "newera-s2s", image: Any = None, face_crop: bool = True, idle_video: bool = False,
                 instructions: str | None = None, input_sample_rate: int = AUDIO_RATE, record: bool = False,
                 client_secret: str | ClientSecret | None = None, mode: str | None = None,
-                video_format: str | None = None, output: str | None = None, **realtime_settings) -> "_Connect":
+                video_format: str | None = None, output: str | None = None, transport: str | None = None,
+                **realtime_settings) -> "_Connect":
         """Open a call: `async with client.avatar.connect(...) as call:`.
 
         mode           "conversational" (default: the avatar listens and answers), "render-audio" (you stream
@@ -760,8 +836,16 @@ class Avatar:
         model          "newera-s2s" or "newera-s2s-mini".
         idle_video     also stream the face while it listens (about ten times the data).
         record         keep every frame and its audio so `call.save_mp4()` works (about 1 MB per second of video).
+                       Needs `transport="websocket"`: with livekit there are no frames to keep (WrongTransport).
         client_secret  connect with a secret from `create_session()` instead of the API key.
-        video_format   "h264" (default: H.264 access units, under 1 Mbit/s; decoded with PyAV, which the SDK installs;
+        transport      "livekit" (default): the avatar's video and audio are sent in a LiveKit (WebRTC) room, to a
+                       browser or mobile app: `call.livekit` has the `url` and `token` to join it with any LiveKit client
+                       SDK. Lines, interrupts and line events work as before on the socket. Nothing arrives as video on the
+                       socket, so `record`, `save_mp4`, `save_frames`, `save_wav`, `frames()`, `units()`, `audio()` and
+                       `LipSyncPlayer` raise WrongTransport. "websocket": the video chunks arrive on the socket (the
+                       behaviour of 0.5 and before), for when your server processes or saves the frames.
+        video_format   websocket transport only (the livekit transport has no video_format).
+                       "h264" (default: H.264 access units, under 1 Mbit/s; decoded with PyAV, which the SDK installs;
                        `newera.h264.H264Decoder` or `LipSyncPlayer` do it for you) or "jpeg" (JPEG frames, several
                        times the data; no decoder needed).
         output         "original" (default) or "square". "original": the video has the size and framing of the photo
@@ -784,17 +868,24 @@ class Avatar:
             mode = mode or client_secret.mode
             video_format = video_format or client_secret.video_format
             output = output or client_secret.output
+            transport = transport or client_secret.transport
             model, client_secret = client_secret.model, client_secret.value
         mode = mode or "conversational"
         _check_mode(mode)
+        transport = transport or DEFAULT_TRANSPORT
+        _check_transport(transport)
+        if transport == "livekit" and record:
+            _need_socket_media(transport, "record=True")
         output = output or DEFAULT_OUTPUT
-        if video_format is None:
+        if transport == "livekit":
+            video_format = "webrtc"          # not a choice: the room carries its own H.264 track
+        elif video_format is None:
             video_format = DEFAULT_VIDEO_FORMAT
             if not _has_av():                # PyAV is a dependency; a stripped-down install still gets video
                 warnings.warn("PyAV (av) is not installed, so the call uses video_format=\"jpeg\"; "
                               "pip install av for H.264.", stacklevel=2)
                 video_format = "jpeg"
-        if video_format == "h264":
+        if transport == "websocket" and video_format == "h264":
             from .h264 import require_av
             require_av()                    # before any connection: a missing PyAV must not surface mid-call
         if mode == "conversational":
@@ -806,7 +897,7 @@ class Avatar:
                 raise ValueError("language, instructions, model, input_sample_rate and realtime settings are for "
                                  "conversational mode; the render modes take only the face options.")
             session = build_session(avatar=avatar, voice=None, image=image, face_crop=face_crop, idle_video=idle_video)
-        return _Connect(self._client, session, model, record, client_secret, mode, video_format, output)
+        return _Connect(self._client, session, model, record, client_secret, mode, video_format, output, transport)
 
 
 def _has_av() -> bool:
@@ -815,6 +906,11 @@ def _has_av() -> bool:
     except ImportError:
         return False
     return True
+
+
+def _check_transport(transport: str) -> None:
+    if transport not in TRANSPORTS:
+        raise ValueError("transport must be one of %s, not %r" % (", ".join(TRANSPORTS), transport))
 
 
 def _check_output(output: str) -> None:
@@ -875,11 +971,13 @@ def _image_b64(image: Any) -> str:
 
 class _Connect:
     def __init__(self, client, session: dict, model: str, record: bool, secret: str | None,
-                 mode: str = "conversational", video_format: str = DEFAULT_VIDEO_FORMAT, output: str = DEFAULT_OUTPUT):
+                 mode: str = "conversational", video_format: str = DEFAULT_VIDEO_FORMAT, output: str = DEFAULT_OUTPUT,
+                 transport: str = DEFAULT_TRANSPORT):
         self.client, self.session, self.model, self.record, self.secret = client, session, model, record, secret
         self.mode = mode
         self.video_format = video_format
         self.output = output
+        self.transport = transport
         self.call: AvatarCall | None = None
 
     def __await__(self):
@@ -897,8 +995,10 @@ class _Connect:
                 query["model"] = self.model
         if self.mode != "conversational":
             query["mode"] = self.mode          # the secret does not carry the mode: it is always in the URL
-        query["video_format"] = self.video_format      # always said, so a server's own defaults cannot surprise the call
+        if self.transport == "websocket":
+            query["video_format"] = self.video_format  # always said, so a server's own defaults cannot surprise the call
         query["output"] = self.output
+        query["transport"] = self.transport            # likewise: a secret's or a server's default must not surprise the call
         if query:
             url += "?" + urllib.parse.urlencode(query)
         ctx = self.client._ssl_context()
@@ -909,7 +1009,8 @@ class _Connect:
         except websockets.InvalidStatus as exc:
             raise error_for(None, "The server refused the connection (HTTP %s)." % exc.response.status_code,
                             http_status=exc.response.status_code) from exc
-        self.call = AvatarCall(ws, self.session, record=self.record, mode=self.mode, video_format=self.video_format)
+        self.call = AvatarCall(ws, self.session, record=self.record, mode=self.mode, video_format=self.video_format,
+                              transport=self.transport)
         try:
             await self.call._start()
         except BaseException:
@@ -1032,9 +1133,11 @@ class AvatarCall:
     """An open call. Send audio in, iterate `events()` out; `close()` ends it (or leave the `async with`)."""
 
     def __init__(self, ws, session: dict, *, record: bool = False, mode: str = "conversational",
-                 video_format: str = "jpeg"):
+                 video_format: str = "jpeg", transport: str = "websocket"):
         self._ws = ws
         self.mode = mode
+        self.transport = transport                    # "livekit" or "websocket"; what the server answers is in `ready.transport`
+        self.livekit: LiveKitRoom | None = None       # the room to join (url, token, ...), from avatar.ready, with livekit
         self.video_format = video_format              # what the server answers in avatar.ready, once started
         self.lines: dict[str, Line] = {}              # the lines you started (render modes), by id
         self.last_error: AvatarError | None = None    # the last `error` event, as its exception
@@ -1073,11 +1176,15 @@ class AvatarCall:
                 if isinstance(ev, AvatarReady):
                     self.ready = ev
                     self.video_format = ev.video_format
+                    self.transport = ev.transport
+                    self.livekit = ev.livekit
                 elif isinstance(ev, ErrorEvent):
                     await self._wait_close()
                     raise ev.exception(self.close_code)
                 elif ev.type == "session.created":
                     self.session = ev.raw.get("session", {})
+                    if self.livekit is None:             # render modes also carry the room here
+                        self.livekit = parse_livekit(ev.raw.get("livekit") or self.session.get("livekit"))
                     break
         except websockets.ConnectionClosed as exc:
             self._note_close()
@@ -1294,7 +1401,9 @@ class AvatarCall:
     async def request_keyframe(self) -> None:
         """h264 only: ask for a keyframe (`avatar.video.keyframe`), for when your decoder lost its picture. The
         server answers with an IDR unit (SPS and PPS in front) in the next video event. Harmless (sends nothing)
-        on a JPEG call. `LipSyncPlayer(request_keyframe=call.request_keyframe)` calls it for you."""
+        on a JPEG call. `LipSyncPlayer(request_keyframe=call.request_keyframe)` calls it for you. Raises WrongTransport
+        on a livekit call (the room's video is not decoded by you)."""
+        _need_socket_media(self.transport, "request_keyframe()")
         if self.video_format == "h264" and not self._closed:
             await self._send({"type": "avatar.video.keyframe"})
 
@@ -1341,21 +1450,25 @@ class AvatarCall:
             yield item
 
     async def frames(self) -> AsyncIterator[tuple[int, bytes]]:
-        """(frame_index, JPEG bytes) of every reply frame, in order, as they arrive."""
+        """(frame_index, JPEG bytes) of every reply frame, in order, as they arrive. WrongTransport on a livekit call."""
+        _need_socket_media(self.transport, "call.frames()")
         async for ev in self.events():
             if isinstance(ev, VideoChunk) and ev.speech:
                 for i, jpeg in enumerate(ev.frames):
                     yield ev.frame_index + i, jpeg
 
     async def units(self) -> AsyncIterator[tuple[int, bytes, bool]]:
-        """h264 calls: (frame_index, access unit, is_keyframe) of every reply frame, in order, as they arrive."""
+        """h264 calls: (frame_index, access unit, is_keyframe) of every reply frame, in order, as they arrive.
+        WrongTransport on a livekit call."""
+        _need_socket_media(self.transport, "call.units()")
         async for ev in self.events():
             if isinstance(ev, VideoChunk) and ev.speech and ev.video_format == "h264":
                 for i, unit in enumerate(ev.units):
                     yield ev.frame_index + i, unit, i in ev.keyframes
 
     async def audio(self) -> AsyncIterator[bytes]:
-        """The reply audio (PCM16 mono 24 kHz) in order, as it arrives."""
+        """The reply audio (PCM16 mono 24 kHz) in order, as it arrives. WrongTransport on a livekit call."""
+        _need_socket_media(self.transport, "call.audio()")
         async for ev in self.events():
             if isinstance(ev, VideoChunk) and ev.speech and ev.audio:
                 yield ev.audio
@@ -1366,7 +1479,7 @@ class AvatarCall:
         """Events up to the end of the next reply: `response.done`, then until no reply video has come for
         `quiet` seconds (the voice finishes before the video does). Raises the matching AvatarError on an
         `error` event. Collects text, video and audio."""
-        reply = AvatarReply()
+        reply = AvatarReply(transport=self.transport)
         deadline = time.monotonic() + timeout
         done_at: float | None = None
         last_video = time.monotonic()
@@ -1411,7 +1524,8 @@ class AvatarCall:
 
     # ----------------------------------------------------------------------- save
 
-    def _recorded(self) -> Timeline:
+    def _recorded(self, what: str = "saving the call") -> Timeline:
+        _need_socket_media(self.transport, what)
         if self.timeline is None:
             raise RuntimeError("This call was not recorded. Open it with connect(..., record=True).")
         return self.timeline
@@ -1419,16 +1533,16 @@ class AvatarCall:
     def save_mp4(self, path: str | os.PathLike) -> str:
         """The recorded video and audio as an MP4 (needs `record=True`). A JPEG call is encoded with ffmpeg. An h264
         call is muxed without re-encoding the video and needs PyAV (the audio is encoded to AAC)."""
-        return self._recorded().save_mp4(path)
+        return self._recorded("save_mp4()").save_mp4(path)
 
     def save_h264(self, path: str | os.PathLike) -> str:
         """An h264 call's video as the raw Annex-B stream that was received (needs `record=True`)."""
-        return self._recorded().save_h264(path)
+        return self._recorded("save_h264()").save_h264(path)
 
     def save_wav(self, path: str | os.PathLike) -> str:
         """The recorded reply audio as a WAV (needs `record=True`)."""
-        return self._recorded().save_wav(path)
+        return self._recorded("save_wav()").save_wav(path)
 
     def save_frames(self, directory: str | os.PathLike) -> str:
         """The recorded frames as numbered JPEGs (needs `record=True`; an h264 call is decoded, needs PyAV)."""
-        return self._recorded().save_frames(directory)
+        return self._recorded("save_frames()").save_frames(directory)

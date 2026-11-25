@@ -36,7 +36,8 @@ async def main(args):
     client = Newera()                                # NEWERA_API_KEY from the environment
     async with client.avatar.connect(avatar="lama", mode="render-audio", record=True, image=args.image,
                                      output="square" if args.square else "original",
-                                     video_format="jpeg" if args.jpeg else "h264") as call:
+                                     video_format="jpeg" if args.jpeg else "h264",
+                                     transport="websocket") as call:     # the video chunks on the socket, to save the MP4
         r = call.ready
         print("video: %s, %s, %d x %d%s" % (r.video_format, r.output, r.width, r.height,
                                             " (%s)" % r.output_reason if r.output_reason else ""))

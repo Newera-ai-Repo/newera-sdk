@@ -16,7 +16,7 @@ def test_avatar_replies_with_paired_video_and_audio(tmp_path):
         if not availability.free:
             pytest.skip("the avatar is busy or unavailable right now")
         async with client.avatar.connect(voice="female", language="en", record=True,
-                                         instructions="Answer in one short sentence.") as call:
+                                         instructions="Answer in one short sentence.", transport="websocket") as call:
             assert call.ready.fps == 25
             await call.send_text("Hello, who are you?")
             reply = await call.wait_reply(timeout=90)

@@ -60,8 +60,8 @@ H.264 video (the default, see [Video format and output](#video-format-and-output
 ## The avatar
 
 A talking face that answers by voice, in real time: you stream the caller's audio in and get the
-assistant's speech back as **video with its sound** (512 x 512, 25 frames per second, lip-synced) plus the
-words of both sides. It speaks Arabic and English. Access is on request: your organisation must be enabled
+assistant's speech back as **video with its sound** (25 frames per second, lip-synced), in a LiveKit room or as
+frames on the socket (see [Transport](#transport)), plus the words of both sides. It speaks Arabic and English. Access is on request: your organisation must be enabled
 for the avatar (ask your Newera account manager).
 
 ### Try it: one command
@@ -89,11 +89,12 @@ from newera import Newera
 
 async def main():
     client = Newera()                                   # NEWERA_API_KEY from the environment
-    async with client.avatar.connect(avatar="lama", voice="female", record=True) as call:
+    # transport="websocket": the video arrives on the socket, so it can be recorded (the default, "livekit", shows it in a browser or app)
+    async with client.avatar.connect(avatar="lama", voice="female", record=True, transport="websocket") as call:
         await call.send_file("question.wav")            # streamed at real time, as a microphone would
         reply = await call.wait_reply()
         print(reply.user_text, "->", reply.text)
-        call.save_mp4("reply.mp4")                      # frames and audio muxed (needs ffmpeg)
+        call.save_mp4("reply.mp4")                      # the received video and audio muxed
 
 asyncio.run(main())
 ```
@@ -103,7 +104,8 @@ asyncio.run(main())
 `client.avatar.connect(...)` takes `avatar` (a preset face, `"lama"`), `image` (your own photo: a path, bytes or
 base64), `voice` (`"male"` or `"female"`, independent of the face), `language` (`"ar"`, `"en"`, or `None` to
 detect), `model` (`"newera-s2s"` or `"newera-s2s-mini"`), `idle_video` (also stream the face while it listens),
-`instructions`, `record` (keep the video so `save_mp4` works), and any other realtime `session.update`
+`instructions`, `record` (keep the video so `save_mp4` works; needs `transport="websocket"`), `transport`
+(`"livekit"` by default, or `"websocket"`: see [Transport](#transport)), and any other realtime `session.update`
 setting as a keyword (`turn_detection=...`, `tools=...`).
 
 The call object:
@@ -111,20 +113,86 @@ The call object:
 * `await call.send_audio(pcm16_bytes)`: PCM16 mono 24 kHz, in real time, about 20 ms at a time (keep sending
   silence too, so turn detection works). `await call.send_file("q.wav")` streams a WAV at real time for you,
   resampling it if needed. `await call.send_text("hello")` is a typed turn.
+* `call.transport` (`"livekit"` or `"websocket"`) and `call.livekit` (the room, with `livekit`: `url`, `token`, `room`,
+  `identity`, `avatar_identity`, `video`, `audio`, `data_topics`; `None` with `websocket`).
 * `async for event in call.events():` every server event, typed: `UserTranscript(text)`,
   `ReplyTextDelta(text)`, `ReplyText(text)`, `VideoChunk` (`frames`: JPEG bytes, `audio`: the PCM16 24 kHz of exactly
   those frames, `frame_index`, `start_ms`, `fps`), `Interrupted` (the caller started talking: drop everything
   queued), `Unavailable`, `ResponseDone`, `ErrorEvent`, and `OtherEvent` for the rest of the realtime protocol.
-  `call.frames()` yields `(frame_index, jpeg)` and `call.audio()` the reply audio, if that is all you need.
+  `call.frames()` yields `(frame_index, jpeg)` and `call.audio()` the reply audio, if that is all you need. With the
+  default `livekit` transport there are no `VideoChunk` events: the video and audio are in the room.
 * `await call.wait_reply()` collects the next reply: `AvatarReply(user_text, text, frames, audio, chunks,
   first_text_s, first_video_s)`.
-* `call.save_mp4(path)` (needs ffmpeg), `call.save_wav(path)`, `call.save_frames(dir)`: of the recorded call.
+* `call.save_mp4(path)`, `call.save_wav(path)`, `call.save_frames(dir)`: of the recorded call (`transport="websocket"`
+  and `record=True`; with `livekit` they raise `WrongTransport`).
 * `await call.close()` (also at the end of `async with`): sends `session.end`; `call.summary` then holds the
   connected and billed seconds.
 
-Play the video with the audio as the clock: show frame `frame_index / fps` seconds into the audio of the same
+With `transport="websocket"`, play the video with the audio as the clock: show frame `frame_index / fps` seconds into the audio of the same
 event; buffer about 2 seconds before a reply starts.
 `newera avatar` does exactly this (`newera.talk.Playback`); the docs have the same logic for browsers.
+
+### Transport
+
+Two ways to get the avatar's video and sound. You choose per call with `transport=`:
+
+* `transport="livekit"` (**the default, and the one to use to show the avatar in a browser or a mobile app**): the video
+  (H.264) and the voice are published in a [LiveKit](https://livekit.io) room, which the front end joins with any LiveKit
+  client SDK (web, iOS, Android, Flutter, React Native, Unity). The SDK only hands you the room's `url` and `token`: it
+  needs no LiveKit package. The socket still carries everything you send (lines, audio, interrupts) and the events
+  (`LineStarted`, `LineDone`, errors, ...); no video arrives on it. Line events are also sent in the room, as data
+  messages on the topic `avatar.event`.
+* `transport="websocket"`: the video chunks arrive on the socket, as in 0.5 and before. Use it when your **server processes
+  the frames** or saves them: `record=True`, `save_mp4()`, `save_frames()`, `save_wav()`, `call.frames()`, `call.units()`,
+  `call.audio()`, `reply.frames`, `LipSyncPlayer`, `newera avatar`. These raise `WrongTransport` (an `AvatarError`) on a
+  `livekit` call, with a message that says to connect with `transport="websocket"`: they never return nothing quietly.
+  `video_format` and the H.264 and JPEG details below apply to this transport only.
+
+A Python server that opens a call and gives the room to its front end:
+
+```python
+import asyncio
+from newera import Newera
+
+async def main():
+    client = Newera()                                    # NEWERA_API_KEY from the environment
+    async with client.avatar.connect(avatar="lama", mode="render-text") as call:     # transport="livekit" is the default
+        room = call.livekit                              # LiveKitRoom
+        print(room.url, room.token)                      # hand these two to your front end (the token is for one viewer, 10 minutes)
+        line = await call.speak("Welcome to the clinic.")
+        print(await line.wait(timeout=60))               # "completed"; the browser shows and plays it
+
+asyncio.run(main())
+```
+
+The page joins the room (`npm i livekit-client`; the front end gets `url` and `token` from your server):
+
+```html
+<div id="stage"></div>
+<button id="start">Start</button>
+<script type="module">
+  import { Room, RoomEvent } from "livekit-client";
+
+  const { url, token } = await (await fetch("/avatar-room")).json();   // from your server: call.livekit.url and .token
+  const room = new Room();
+  room.on(RoomEvent.TrackSubscribed, (track) => document.getElementById("stage").appendChild(track.attach()));  // <video> and <audio>
+  room.on(RoomEvent.DataReceived, (payload, _p, _k, topic) => {
+    if (topic === "avatar.event") console.log(JSON.parse(new TextDecoder().decode(payload)));   // line started / done
+  });
+  await room.connect(url, token);
+  document.getElementById("start").onclick = () => room.startAudio();   // browsers play sound only after a click
+</script>
+```
+
+Server-issued client secrets take it too: `await client.avatar.create_session(mode="render-text", transport="livekit")`
+keeps the transport in the secret, and `client.avatar.connect(client_secret=secret)` uses it (the page may also pass
+`&transport=livekit` or `&transport=websocket` on the socket URL). A page that holds only a client secret opens the socket
+as usual and reads the room from `avatar.ready`: `ev.livekit.url` and `ev.livekit.token`. Complete examples:
+[`avatar_livekit.py`](examples/avatar_livekit.py) and [`avatar_server_token.py`](examples/avatar_server_token.py).
+
+Errors: `TransportUnavailable` (`transport_unavailable`, an `AvatarUnavailable`) when the LiveKit transport is not
+available right now: connect again with `transport="websocket"`, or retry. `avatar_render_stalled` (close code 4503) means
+rendering stopped. Both are `AvatarUnavailable`.
 
 ### Render modes: your voice or your text, Newera's face
 
@@ -184,13 +252,14 @@ Examples: [`avatar_render_audio.py`](examples/avatar_render_audio.py), [`avatar_
 
 ### Video format and output
 
-Two options, both with defaults you rarely need to change:
+Two options, both with defaults you rarely need to change. `video_format` is for `transport="websocket"` (the LiveKit
+room has its own H.264 track); `output` works with both transports. The examples here pass `transport="websocket"`:
 
 ```python
 # defaults: H.264 video, the size and framing of your photo
-async with client.avatar.connect(image="me.jpg", mode="render-text", record=True) as call: ...
+async with client.avatar.connect(image="me.jpg", mode="render-text", record=True, transport="websocket") as call: ...
 # the old behaviour: JPEG frames of the 512 x 512 face
-async with client.avatar.connect(image="me.jpg", mode="render-text", output="square", video_format="jpeg") as call: ...
+async with client.avatar.connect(image="me.jpg", mode="render-text", output="square", video_format="jpeg", transport="websocket") as call: ...
 ```
 
 * `output="original"` (default): the video has the SAME size and framing as the photo you pass as `image` (a path, bytes,
@@ -208,7 +277,7 @@ async with client.avatar.connect(image="me.jpg", mode="render-text", output="squ
 H.264 details:
 
 ```python
-async with client.avatar.connect(mode="render-audio", record=True) as call:
+async with client.avatar.connect(mode="render-audio", record=True, transport="websocket") as call:
     ...                                    # VideoChunk.units: one Annex-B access unit per frame
     call.save_mp4("out.mp4")               # the received video muxed as it is, no re-encode
 ```
@@ -256,12 +325,14 @@ A call can be refused or ended; handle these errors, all `NeweraError`s:
 | exception | when |
 |---|---|
 | `AvatarBusy` | the avatar can't take this call right now: try again after `.retry_after_s` seconds (may be None) |
-| `AvatarUnavailable` | the face or Newera Core is temporarily unavailable (also `video_format_unavailable`: connect with `video_format="jpeg"`) |
+| `AvatarUnavailable` | the face or Newera Core is temporarily unavailable (also `video_format_unavailable`: connect with `video_format="jpeg"`, and `avatar_render_stalled`) |
+| `TransportUnavailable` | (an `AvatarUnavailable`) the LiveKit transport is not available right now: connect with `transport="websocket"` or retry |
+| `WrongTransport` | you used something that needs the video on the socket (`save_mp4`, `frames()`, `LipSyncPlayer`, `record=True`, ...) on a `livekit` call: connect with `transport="websocket"` |
 | `NotEnabled` | the organisation is not enabled for this avatar product (conversational and render are separate) or the voice model |
 | `AuthenticationError` | missing or wrong key, or a used or expired client secret |
 | `InsufficientQuota` | the prepaid balance cannot cover the call |
 | `RateLimited` | too many requests, or too many calls on this key right now |
-| `InvalidRequest` | a bad session field or model (`invalid_avatar_image`: no usable face in the photo; `invalid_video_format`, `invalid_output`) |
+| `InvalidRequest` | a bad session field or model (`invalid_avatar_image`: no usable face in the photo; `invalid_video_format`, `invalid_output`, `invalid_transport`) |
 | `CallTimeLimit` | the service ended the call |
 | `WrongMode` | an event of another mode (audio line in render-text, a line in conversational) |
 | `LineError` | a refused line: bad or duplicate `line_id`, too many queued lines, line too long, bad audio or text |
@@ -274,12 +345,12 @@ An API key must not sit in a web page. Your server trades it for a one-use clien
 seconds, and the page connects with that:
 
 ```python
-secret = await client.avatar.create_session(model="newera-s2s")      # ClientSecret(value="avs_...", expires_at=...)
+secret = await client.avatar.create_session(model="newera-s2s", transport="livekit")      # ClientSecret(value="avs_...", expires_at=...)
 ```
 
 [`examples/avatar_server_token.py`](examples/avatar_server_token.py) is a FastAPI endpoint that returns it. The page
-opens `wss://api.newera.ai/v1/avatar` with the subprotocols `["realtime", "newera-client-secret." + secret]`
-(see the docs for the player code). Python can connect with a secret too:
+opens `wss://api.newera.ai/v1/avatar` (with `?transport=livekit`, see [Transport](#transport)) with the subprotocols
+`["realtime", "newera-client-secret." + secret]`; `transport="websocket"` plays the frames itself (see the docs for the player code). Python can connect with a secret too:
 `client.avatar.connect(client_secret=secret)`.
 
 Only send a photo (`image=`) of a person who agreed to be animated, and tell them what it is for.
@@ -432,6 +503,13 @@ real avatar and is skipped unless `NEWERA_API_KEY` is set (use a key enabled for
 
 ## Release notes
 
+Full list: [CHANGELOG.md](CHANGELOG.md).
+
+* 0.6.0: **behaviour change: the default avatar transport is now `livekit`.** `connect(...)` publishes the video and sound
+  in a LiveKit room (`call.livekit.url`, `.token`) instead of sending video chunks on the socket. To keep the old behaviour
+  pass `transport="websocket"` (needed for `record=True`, `save_mp4()`, `save_frames()`, `save_wav()`, `call.frames()`,
+  `call.audio()`, `LipSyncPlayer`; on a livekit call they raise `WrongTransport`). New: `call.transport`, `call.livekit`,
+  `LiveKitRoom`, `create_session(transport=...)`, `TransportUnavailable`.
 * 0.5.0: calls use H.264 video by default (about 0.7 instead of 5.6 Mbit/s) and the new `output="original"` by default: the
   video has the size and framing of the photo you pass as `image`. `connect(..., output="original"|"square",
   video_format="h264"|"jpeg")`, the same options on `create_session()`, `call.ready.output` / `output_reason`, the window
