@@ -15,6 +15,7 @@ The token is never printed. The SDK itself does not depend on livekit: only this
 
 import argparse
 import asyncio
+from datetime import timedelta
 import os
 import uuid
 
@@ -30,7 +31,7 @@ def mint_token(room: str, agent: str | None) -> str:
              .with_identity("avatar-" + uuid.uuid4().hex[:8])
              .with_kind("agent")
              .with_grants(grants)
-             .with_ttl(__import__("datetime").timedelta(minutes=10)))
+             .with_ttl(timedelta(minutes=10)))
     if agent:
         token = token.with_attributes({"lk.publish_on_behalf": agent})
     return token.to_jwt()
