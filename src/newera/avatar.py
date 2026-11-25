@@ -117,6 +117,13 @@ class AvatarUnavailable(AvatarError):
     this gateway cannot produce H.264 right now (connect again with the default JPEG)."""
 
 
+class ByoRefused(InvalidRequest):
+    """4400: the server refused to join your own LiveKit room (`livekit_room=`). `code` is one of
+    `byo_not_enabled` (not enabled for this account), `byo_host_not_allowed` (that LiveKit host is not enabled by Newera
+    for the account), `invalid_livekit_url`, `invalid_livekit_token`, `invalid_livekit` (wrong shape, bad
+    `publish_on_behalf`) or `avatar_locked` (the room can only be given in the first session.update). Nothing is billed."""
+
+
 class WrongTransport(AvatarError):
     """The call uses the LiveKit transport, so the video and its audio are in the LiveKit room and not on the
     socket. The API you used needs them on the socket: connect with `transport="websocket"`."""
@@ -137,6 +144,8 @@ _BY_CODE = {
     "avatar_busy": AvatarBusy, "avatar_unavailable": AvatarUnavailable, "model_unavailable": AvatarUnavailable,
     "avatar_concurrency_limit": RateLimited, "session_time_limit": CallTimeLimit,
     "invalid_mode": InvalidRequest, "wrong_mode": WrongMode,
+    "byo_not_enabled": ByoRefused, "byo_host_not_allowed": ByoRefused, "invalid_livekit_url": ByoRefused,
+    "invalid_livekit_token": ByoRefused, "invalid_livekit": ByoRefused, "avatar_locked": ByoRefused,
     "invalid_transport": InvalidRequest, "transport_unavailable": TransportUnavailable,
     "avatar_render_stalled": AvatarUnavailable, "wrong_transport": WrongTransport,
     "invalid_video_format": InvalidRequest, "invalid_output": InvalidRequest, "video_format_unavailable": AvatarUnavailable,
@@ -169,11 +178,50 @@ class AvatarEvent:
 
 
 @dataclasses.dataclass
+class LiveKitJoin:
+    """Your own LiveKit room for the avatar to join (`connect(..., livekit_room=LiveKitJoin(...))`).
+
+    `url` is your LiveKit server (`wss://livekit.example.com`); Newera must have enabled that host for your account.
+    `token` is a LiveKit access token YOU minted for the avatar's participant (identity containing "avatar", kind
+    "agent", grants room_join + can_publish + can_publish_data for that room only). `publish_on_behalf` is optional:
+    your agent's identity, so your front end shows the avatar as the agent. The token is hidden from `repr()` and the
+    SDK never logs it."""
+    url: str
+    token: str = dataclasses.field(repr=False)
+    publish_on_behalf: str | None = None
+
+    def as_dict(self) -> dict:
+        d = {"url": self.url, "token": self.token}
+        if self.publish_on_behalf:
+            d["publish_on_behalf"] = self.publish_on_behalf
+        return d
+
+
+def _livekit_join(value: "LiveKitJoin | dict") -> LiveKitJoin:
+    if isinstance(value, dict):
+        extra = set(value) - {"url", "token", "publish_on_behalf"}
+        if extra:
+            raise ValueError("livekit_room takes url, token and publish_on_behalf, not %s" % ", ".join(sorted(extra)))
+        value = LiveKitJoin(url=value.get("url"), token=value.get("token"),
+                            publish_on_behalf=value.get("publish_on_behalf"))
+    if not isinstance(value, LiveKitJoin):
+        raise TypeError("livekit_room must be a LiveKitJoin or a dict {url, token, publish_on_behalf}")
+    if not isinstance(value.url, str) or not value.url:
+        raise ValueError("livekit_room needs a url, like wss://livekit.example.com")
+    if not isinstance(value.token, str) or not value.token:
+        raise ValueError("livekit_room needs a token (a LiveKit access token for the avatar's participant)")
+    if value.publish_on_behalf is not None and not isinstance(value.publish_on_behalf, str):
+        raise ValueError("livekit_room publish_on_behalf must be a string (your agent's identity)")
+    return value
+
+
+@dataclasses.dataclass
 class LiveKitRoom:
     """The LiveKit room of a call made with `transport="livekit"` (`call.livekit`). Hand `url` and `token` to the
     page or app that shows the avatar: `await room.connect(url, token)` with any LiveKit client SDK, then play
     the avatar's video and audio tracks. The token is for this room and one viewer, and has to be used within
-    10 minutes. Line events are also sent in the room as data messages on `data_topics["events"]`."""
+    10 minutes. When you connected with `livekit_room=` the avatar joined YOUR room instead: `byo` is True, `identity`
+    is the avatar's participant identity there and `token` is empty (your clients are already in your room). Line events are also sent in the room as data messages on `data_topics["events"]`."""
     url: str = ""
     token: str = dataclasses.field(default="", repr=False)
     room: str = ""
@@ -182,6 +230,7 @@ class LiveKitRoom:
     video: dict = dataclasses.field(default_factory=dict)         # {"codec": "h264", "width": 512, "height": 512, "fps": 25}
     audio: dict = dataclasses.field(default_factory=dict)         # {"sample_rate": 24000, "channels": 1}
     data_topics: dict = dataclasses.field(default_factory=dict)   # {"events": "avatar.event", "control": "avatar.control"}
+    byo: bool = False                   # True when the avatar joined YOUR room (`livekit_room=`): there is no viewer token
 
 
 def parse_livekit(data: Any) -> LiveKitRoom | None:
@@ -192,7 +241,7 @@ def parse_livekit(data: Any) -> LiveKitRoom | None:
                        room=str(data.get("room") or ""), identity=str(data.get("identity") or ""),
                        avatar_identity=str(data.get("avatar_identity") or ""),
                        video=dict(data.get("video") or {}), audio=dict(data.get("audio") or {}),
-                       data_topics=dict(data.get("data_topics") or {}))
+                       data_topics=dict(data.get("data_topics") or {}), byo=bool(data.get("byo")))
 
 
 @dataclasses.dataclass
@@ -280,6 +329,13 @@ class Interrupted(AvatarEvent):
 class Unavailable(AvatarEvent):
     """`avatar.unavailable`: the face stopped mid-call; the voice goes on as AudioDelta events."""
     message: str = ""
+
+
+@dataclasses.dataclass
+class LiveKitDisconnected(AvatarEvent):
+    """`avatar.livekit.disconnected`: your LiveKit room dropped the avatar (kicked, room deleted, token expired,
+    network). The call then ends normally (close 1000 `livekit_room_disconnected`)."""
+    reason: str = ""
 
 
 @dataclasses.dataclass
@@ -406,6 +462,8 @@ def parse_event(data: dict) -> AvatarEvent:
                            video=data.get("video") if isinstance(data.get("video"), dict) else None,
                            transport=data.get("transport") or ("livekit" if data.get("video_format") == "webrtc" else "websocket"),
                            livekit=parse_livekit(data.get("livekit")))
+    if t == "avatar.livekit.disconnected":
+        return LiveKitDisconnected(raw=data, reason=str(data.get("reason") or ""))
     if t == "avatar.interrupted":
         return Interrupted(raw=data)
     if t == "avatar.unavailable":
@@ -818,7 +876,7 @@ class Avatar:
                 instructions: str | None = None, input_sample_rate: int = AUDIO_RATE, record: bool = False,
                 client_secret: str | ClientSecret | None = None, mode: str | None = None,
                 video_format: str | None = None, output: str | None = None, transport: str | None = None,
-                **realtime_settings) -> "_Connect":
+                livekit_room: "LiveKitJoin | dict | None" = None, **realtime_settings) -> "_Connect":
         """Open a call: `async with client.avatar.connect(...) as call:`.
 
         mode           "conversational" (default: the avatar listens and answers), "render-audio" (you stream
@@ -844,6 +902,11 @@ class Avatar:
                        socket, so `record`, `save_mp4`, `save_frames`, `save_wav`, `frames()`, `units()`, `audio()` and
                        `LipSyncPlayer` raise WrongTransport. "websocket": the video chunks arrive on the socket (the
                        behaviour of 0.5 and before), for when your server processes or saves the frames.
+        livekit_room   `LiveKitJoin(url, token, publish_on_behalf=None)` or a dict with those keys: the avatar joins
+                       YOUR LiveKit room (with the identity in your token) and publishes its video and audio there,
+                       instead of in a Newera room. Needs `transport="livekit"` (ValueError otherwise) and the host
+                       enabled by Newera for your account (else `ByoRefused`). `call.livekit` then has `byo=True` and no
+                       viewer token. See `call.on_livekit_disconnected`.
         video_format   websocket transport only (the livekit transport has no video_format).
                        "h264" (default: H.264 access units, under 1 Mbit/s; decoded with PyAV, which the SDK installs;
                        `newera.h264.H264Decoder` or `LipSyncPlayer` do it for you) or "jpeg" (JPEG frames, several
@@ -874,6 +937,10 @@ class Avatar:
         _check_mode(mode)
         transport = transport or DEFAULT_TRANSPORT
         _check_transport(transport)
+        if livekit_room is not None:
+            if transport != "livekit":
+                raise ValueError('livekit_room needs transport="livekit" (the avatar joins your room as WebRTC tracks)')
+            livekit_room = _livekit_join(livekit_room)
         if transport == "livekit" and record:
             _need_socket_media(transport, "record=True")
         output = output or DEFAULT_OUTPUT
@@ -897,6 +964,8 @@ class Avatar:
                 raise ValueError("language, instructions, model, input_sample_rate and realtime settings are for "
                                  "conversational mode; the render modes take only the face options.")
             session = build_session(avatar=avatar, voice=None, image=image, face_crop=face_crop, idle_video=idle_video)
+        if livekit_room is not None:
+            session["avatar_livekit"] = livekit_room.as_dict()
         return _Connect(self._client, session, model, record, client_secret, mode, video_format, output, transport)
 
 
@@ -1141,7 +1210,8 @@ class AvatarCall:
         self.video_format = video_format              # what the server answers in avatar.ready, once started
         self.lines: dict[str, Line] = {}              # the lines you started (render modes), by id
         self.last_error: AvatarError | None = None    # the last `error` event, as its exception
-        self._line_callbacks: dict[str, list] = {"started": [], "done": []}
+        self._line_callbacks: dict[str, list] = {"started": [], "done": [], "livekit_disconnected": []}
+        self.livekit_disconnected: LiveKitDisconnected | None = None   # set when your own LiveKit room dropped the avatar
         self._seq = 0
         self._session = session
         self._queue: asyncio.Queue = asyncio.Queue()
@@ -1167,6 +1237,7 @@ class AvatarCall:
                 await self._send({"type": "session.update", "session": self._session})
             except websockets.ConnectionClosed:
                 pass        # a refused call: the error event is already waiting to be read
+            self._session.pop("avatar_livekit", None)      # your token is not kept past the send
             while True:
                 try:
                     raw = await asyncio.wait_for(self._ws.recv(), 60)
@@ -1236,6 +1307,9 @@ class AvatarCall:
                 line._started.set()
                 line._finish(ev.status)
             self._fire("done", ev)
+        elif isinstance(ev, LiveKitDisconnected):
+            self.livekit_disconnected = ev
+            self._fire("livekit_disconnected", ev)
         elif isinstance(ev, ErrorEvent):
             self.last_error = ev.exception(self.close_code)
             eid = ev.event_id or ""
@@ -1428,6 +1502,13 @@ class AvatarCall:
     def on_line_done(self, callback: Callable[[LineDone], Any]) -> Callable:
         """Call `callback(LineDone)` at each `avatar.line.done` (completed, interrupted or failed)."""
         self._line_callbacks["done"].append(callback)
+        return callback
+
+    def on_livekit_disconnected(self, callback: Callable[[LiveKitDisconnected], Any]) -> Callable:
+        """Call `callback(LiveKitDisconnected)` when your own LiveKit room (`livekit_room=`) dropped the avatar, so your
+        server knows it left. `ev.reason` says why. The call ends normally right after (close code 1000,
+        `call.close_reason == "livekit_room_disconnected"`)."""
+        self._line_callbacks["livekit_disconnected"].append(callback)
         return callback
 
     # -------------------------------------------------------------------- receive
