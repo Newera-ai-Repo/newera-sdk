@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.0
+
+Join your own LiveKit room. Additive, nothing changes for existing code. Needs the server side that accepts
+`avatar_livekit` and your LiveKit host enabled by Newera for the account.
+
+Added
+* `connect(..., livekit_room=LiveKitJoin(url, token, publish_on_behalf=None) | dict)`: the avatar joins your room with the
+  identity in your token and publishes its video and audio there. Sent in the first `session.update` as `avatar_livekit`.
+  Needs `transport="livekit"` (`ValueError` otherwise). The token is hidden from `repr()`, never logged, and dropped after
+  it is sent.
+* `call.livekit` for such a call: `LiveKitRoom` with `byo=True`, the avatar's `identity`, and an empty `token` (no viewer
+  token for a Newera room). New field `LiveKitRoom.byo`.
+* `ByoRefused` (an `InvalidRequest`, with `.code`) for `byo_not_enabled`, `byo_host_not_allowed`, `invalid_livekit_url`,
+  `invalid_livekit_token`, `invalid_livekit`, `avatar_locked`.
+* `avatar.livekit.disconnected` as `LiveKitDisconnected` (`.reason`), `call.on_livekit_disconnected(callback)` and
+  `call.livekit_disconnected`; the call then ends normally (close 1000 `livekit_room_disconnected`).
+* README section "Join your own LiveKit room" (minting the token with `livekit-api`); `examples/avatar_own_room.py`.
+* The SDK still has no dependency on the LiveKit packages.
+
 ## 0.6.0
 
 **Behaviour change: the default transport of the avatar is now `livekit`.**

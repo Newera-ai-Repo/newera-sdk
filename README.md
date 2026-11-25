@@ -194,6 +194,52 @@ Errors: `TransportUnavailable` (`transport_unavailable`, an `AvatarUnavailable`)
 available right now: connect again with `transport="websocket"`, or retry. `avatar_render_stalled` (close code 4503) means
 rendering stopped. Both are `AvatarUnavailable`.
 
+### Join your own LiveKit room
+
+By default the avatar publishes in a Newera LiveKit room and you hand its `url` and `token` to your viewers. If your
+app already has its own LiveKit room (your agent, your users), pass `livekit_room=` and the avatar **joins your room** and
+publishes its video and voice there, as one more participant. Needs `transport="livekit"` (the default; `ValueError`
+otherwise) and your LiveKit host enabled by Newera for your account (else `ByoRefused`).
+
+Mint the avatar's token on your server (`pip install livekit-api`; the SDK itself does not need it). The identity must
+contain "avatar", the kind is "agent", and the grants are for that one room only:
+
+```python
+from livekit import api
+
+def avatar_token(room: str, agent_identity: str) -> str:
+    return (api.AccessToken(LIVEKIT_API_KEY, LIVEKIT_API_SECRET)
+            .with_identity("avatar-" + room)
+            .with_kind("agent")
+            .with_attributes({"lk.publish_on_behalf": agent_identity})
+            .with_grants(api.VideoGrants(room_join=True, room=room, can_publish=True, can_publish_data=True))
+            .to_jwt())
+```
+
+Then connect and keep streaming audio lines as usual:
+
+```python
+from newera import LiveKitJoin
+
+join = LiveKitJoin("wss://livekit.example.com", avatar_token("clinic-1", "my-agent"), publish_on_behalf="my-agent")
+async with client.avatar.connect(mode="render-audio", livekit_room=join) as call:    # or a dict {url, token, publish_on_behalf}
+    call.on_livekit_disconnected(lambda ev: print("avatar left your room:", ev.reason))
+    line = call.start_line("l1")
+    await line.stream(tts_chunks())                    # PCM16 mono 24 kHz
+    print(await line.wait())
+```
+
+`call.livekit` describes the join as the server reports it: `byo=True`, `identity` (the avatar's participant in your
+room) and an empty `token`, because there is no viewer token for a Newera room (your clients are already in yours). It is
+`None` only if the server returns no room object. `publish_on_behalf` is optional (you can put the attribute in the token
+instead). The token is hidden from `repr()` and never logged; it is sent only in the first `session.update` and not kept.
+
+If your room drops the avatar (removed, room deleted, token expired, network) the server sends
+`avatar.livekit.disconnected` (`LiveKitDisconnected`, `.reason`): `call.on_livekit_disconnected(callback)` fires, and the call
+ends normally (close 1000 `livekit_room_disconnected`, no error). Refusals are `ByoRefused` (an `InvalidRequest`, `.code`):
+`byo_not_enabled`, `byo_host_not_allowed`, `invalid_livekit_url`, `invalid_livekit_token`, `invalid_livekit`, `avatar_locked`.
+Complete example: [`avatar_own_room.py`](examples/avatar_own_room.py).
+
 ### Render modes: your voice or your text, Newera's face
 
 The avatar has three modes. `conversational` is the call above and keeps working unchanged. In the two render
@@ -328,6 +374,7 @@ A call can be refused or ended; handle these errors, all `NeweraError`s:
 | `AvatarUnavailable` | the face or Newera Core is temporarily unavailable (also `video_format_unavailable`: connect with `video_format="jpeg"`, and `avatar_render_stalled`) |
 | `TransportUnavailable` | (an `AvatarUnavailable`) the LiveKit transport is not available right now: connect with `transport="websocket"` or retry |
 | `WrongTransport` | you used something that needs the video on the socket (`save_mp4`, `frames()`, `LipSyncPlayer`, `record=True`, ...) on a `livekit` call: connect with `transport="websocket"` |
+| `ByoRefused` | (an `InvalidRequest`) the server refused your own LiveKit room: see `.code` (`byo_not_enabled`, `byo_host_not_allowed`, `invalid_livekit_url`, `invalid_livekit_token`, `invalid_livekit`, `avatar_locked`) |
 | `NotEnabled` | the organisation is not enabled for this avatar product (conversational and render are separate) or the voice model |
 | `AuthenticationError` | missing or wrong key, or a used or expired client secret |
 | `InsufficientQuota` | the prepaid balance cannot cover the call |
@@ -505,6 +552,8 @@ real avatar and is skipped unless `NEWERA_API_KEY` is set (use a key enabled for
 
 Full list: [CHANGELOG.md](CHANGELOG.md).
 
+* 0.7.0: join your own LiveKit room: `connect(..., livekit_room=LiveKitJoin(url, token, publish_on_behalf))`, `call.on_livekit_disconnected`,
+  `ByoRefused`, `LiveKitRoom.byo`. Additive; see "Join your own LiveKit room".
 * 0.6.0: **behaviour change: the default avatar transport is now `livekit`.** `connect(...)` publishes the video and sound
   in a LiveKit room (`call.livekit.url`, `.token`) instead of sending video chunks on the socket. To keep the old behaviour
   pass `transport="websocket"` (needed for `record=True`, `save_mp4()`, `save_frames()`, `save_wav()`, `call.frames()`,
