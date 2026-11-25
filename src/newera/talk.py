@@ -26,6 +26,7 @@ from typing import Any
 from .avatar import (AUDIO_RATE, AudioDelta, AvatarBusy, AvatarError, ErrorEvent, Interrupted, NotEnabled,
                      ReplyTextDelta, ResponseDone, SpeechStarted, Unavailable, UserTranscript, VideoChunk)
 from .client import Newera
+from .h264 import H264Decoder
 
 INSTALL_HINT = 'Install the call dependencies with:  pip install "newera-sdk[avatar]"'
 
@@ -53,8 +54,9 @@ class Playback:
         """Seconds of audio queued and not yet played."""
         return len(self._buf) / 2 / self.rate
 
-    def add(self, ev: VideoChunk) -> None:
-        """A `response.video.chunk`, in the order it arrived."""
+    def add(self, ev: VideoChunk, frames: list | None = None) -> None:
+        """A `response.video.chunk`, in the order it arrived. For an h264 chunk pass its decoded `frames`
+        (`H264Decoder.decode(ev)`); they are what `due_frame()` returns, in place of JPEG bytes."""
         with self._lock:
             end = self._read_pos + len(self._buf) // 2
             contiguous = ev.frame_index == self._next_frame
@@ -66,12 +68,17 @@ class Playback:
             else:
                 at = end
             per = self.rate // ev.fps                                    # samples per frame
-            want = per * len(ev.frames) * 2
+            count = ev.frame_count or len(ev.frames)
+            want = per * count * 2
             audio = (ev.audio or b"")[:want]
             self._buf += audio + bytes(want - len(audio))                # no audio (idle face): silence keeps the clock
-            for i, jpeg in enumerate(ev.frames):
-                self._frames.append((at + i * per, jpeg))
-            self._next_frame = ev.frame_index + len(ev.frames)
+            if ev.video_format == "h264":
+                for f in frames or []:
+                    self._frames.append((at + (f.index - ev.frame_index) * per, f))
+            else:
+                for i, jpeg in enumerate(ev.frames):
+                    self._frames.append((at + i * per, jpeg))
+            self._next_frame = ev.frame_index + count
 
     def add_audio(self, pcm: bytes) -> None:
         """Voice-only audio (after `avatar.unavailable` the server sends response.audio.delta)."""
@@ -98,8 +105,9 @@ class Playback:
             self._read_pos += nbytes // 2
             return out
 
-    def due_frame(self) -> bytes | None:
-        """The newest frame whose time has come on the audio clock (older ones are skipped), or None."""
+    def due_frame(self):
+        """The newest frame whose time has come on the audio clock (older ones are skipped), or None: JPEG bytes,
+        or a `DecodedFrame` on an h264 call."""
         with self._lock:
             jpeg = None
             while self._frames and self._frames[0][0] <= self._read_pos:
@@ -142,7 +150,8 @@ async def _drive(opts: dict, player: Playback, status: Status, stop: asyncio.Eve
         async with client.avatar.connect(
                 opts.get("avatar") or "lama", voice=opts.get("voice") or "female", language=opts.get("language"),
                 model=opts.get("model") or "newera-s2s", image=opts.get("image"), idle_video=bool(opts.get("idle_video")),
-                instructions=opts.get("instructions"), record=bool(opts.get("record"))) as call:
+                instructions=opts.get("instructions"), record=bool(opts.get("record")),
+                video_format=opts.get("video_format") or "jpeg") as call:
             loop = asyncio.get_running_loop()
             if not opts.get("mute"):
                 out_stream = _open_output(player)
@@ -155,7 +164,7 @@ async def _drive(opts: dict, player: Playback, status: Status, stop: asyncio.Eve
             status.text = "Listening..." if not input_file else "Playing the question..."
             feeder = asyncio.create_task(_feed_file(call, input_file) if input_file else _feed_mic(call, mic_q))
             state = {"reply_done": False, "last_video": time.monotonic(), "in_reply": False, "frames": 0}
-            consumer = asyncio.create_task(_events(call, player, status, state, out))
+            consumer = asyncio.create_task(_events(call, player, status, state, out, _make_decoder(call, loop)))
             started = time.monotonic()
             try:
                 while not stop.is_set():
@@ -222,10 +231,22 @@ async def _feed_file(call, path: str) -> None:
     await asyncio.Event().wait()
 
 
-async def _events(call, player: Playback, status: Status, state: dict, out) -> None:
+def _make_decoder(call, loop) -> H264Decoder | None:
+    """The h264 decoder of an h264 call (None for JPEG). When it loses the picture it asks for a keyframe."""
+    if call.video_format != "h264":
+        return None
+    return H264Decoder(on_lost=lambda: loop.call_soon_threadsafe(lambda: asyncio.ensure_future(call.request_keyframe())))
+
+
+async def _events(call, player: Playback, status: Status, state: dict, out, decoder: H264Decoder | None = None) -> None:
+    loop = asyncio.get_running_loop()
     async for ev in call.events():
         if isinstance(ev, VideoChunk):
-            player.add(ev)
+            if ev.video_format == "h264" and decoder is not None:
+                # decode off the event loop, one chunk at a time (awaited here), so the units stay in order
+                player.add(ev, await loop.run_in_executor(None, decoder.decode, ev))
+            else:
+                player.add(ev)
             if ev.speech:
                 state["last_video"] = time.monotonic()
                 status.text = "Speaking"
@@ -234,6 +255,8 @@ async def _events(call, player: Playback, status: Status, state: dict, out) -> N
             state["last_video"] = time.monotonic()
         elif isinstance(ev, (Interrupted, SpeechStarted)):
             player.interrupt()
+            if isinstance(ev, Interrupted) and decoder is not None:
+                decoder.reset()                      # the server sends a keyframe next
             status.text = "Listening..."
             state["reply_done"] = False
         elif isinstance(ev, UserTranscript):
@@ -322,9 +345,12 @@ def _run_window(done: threading.Event, request_stop, player: Playback, status: S
             if status.text == "Speaking" and player.idle:
                 status.text = "Listening..."
             jpeg = player.due_frame()
-            if jpeg:
+            if jpeg is not None:
                 try:
-                    surface = pygame.image.load(io.BytesIO(jpeg), "frame.jpg")
+                    if isinstance(jpeg, bytes):
+                        surface = pygame.image.load(io.BytesIO(jpeg), "frame.jpg")
+                    else:                           # an h264 call: a DecodedFrame of RGB24
+                        surface = pygame.image.frombuffer(jpeg.rgb, (jpeg.width, jpeg.height), "RGB").copy()
                     shown += 1
                 except pygame.error:
                     pass
@@ -353,18 +379,19 @@ def talk(*, api_key: str | None = None, avatar: str = "lama", image: str | None 
          idle_video: bool = False, input_file: str | None = None, window: bool = True, mute: bool = False,
          prebuffer: float = 2.0, record: str | None = None, base_url: str | None = None,
          input_device: Any = None, window_size: int = 512, screenshot_dir: str | None = None,
-         max_seconds: float = 120.0) -> int:
+         max_seconds: float = 120.0, video_format: str = "jpeg") -> int:
     """An interactive call with the avatar: the microphone is the caller, the speaker plays the avatar, a window
     shows the face and the transcript is printed here. Returns the exit code (0 when it ended normally).
 
-    `input_file` replays a WAV as the caller instead of the microphone, and ends the call after the reply."""
+    `input_file` replays a WAV as the caller instead of the microphone, and ends the call after the reply.
+    `video_format="h264"` asks for the H.264 video (about a eighth of the data; needs PyAV, see `newera.h264`)."""
     player, status = Playback(prebuffer=prebuffer), Status()
     result: dict = {"code": 1}
     holder: dict = {}
     opts = dict(api_key=api_key, avatar=avatar, image=image, voice=voice, language=language, model=model,
                 instructions=instructions, idle_video=idle_video, input_file=input_file, mute=mute, record=record,
                 base_url=base_url, input_device=input_device, window_size=window_size, screenshot_dir=screenshot_dir,
-                max_seconds=max_seconds)
+                max_seconds=max_seconds, video_format=video_format)
     print_lock = threading.Lock()
 
     def out(text: str) -> None:

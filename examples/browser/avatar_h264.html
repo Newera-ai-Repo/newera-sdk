@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Newera avatar over H.264</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f4f1ea; --fg: #1d1b17; --line: #b9b3a6; --accent: #8a3b12; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1b1a17; --fg: #ece8df; --line: #55514a; --accent: #e0a070; } }
+  body { margin: 0 auto; max-width: 38rem; padding: 1.5rem 1rem 3rem; background: var(--bg); color: var(--fg);
+         font: 1rem/1.5 Georgia, "Times New Roman", serif; }
+  h1 { font-size: 1.4rem; margin: 0 0 .5rem; }
+  p, label { display: block; margin: .75rem 0 .25rem; }
+  small { color: var(--fg); opacity: .75; }
+  input, button { font: inherit; color: inherit; background: transparent; border: 1px solid var(--line);
+                  padding: .4rem .6rem; border-radius: 0; box-sizing: border-box; }
+  input[type=password] { width: 100%; }
+  button { cursor: pointer; margin-right: .5rem; }
+  button:disabled { opacity: .5; cursor: default; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  canvas { display: block; width: 100%; max-width: 512px; aspect-ratio: 1; margin: 1rem 0; background: #000; }
+  #status { min-height: 1.5em; border-top: 1px solid var(--line); padding-top: .5rem; font-family: ui-monospace, Menlo, monospace; font-size: .9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Newera avatar over H.264</h1>
+  <p>About 0.7 Mbit/s of video instead of about 5.6 Mbit/s of JPEG. Decoded in the browser with WebCodecs.
+     Pick any audio file and the avatar says it, lip-synced.</p>
+
+  <label for="secret">Client secret</label>
+  <input id="secret" type="password" autocomplete="off" placeholder="avs_...">
+  <small>A real site gets this one-use secret (60 seconds) from its own server, which keeps the API key; see
+  <code>avatar_server_token.py</code>. Never put an API key in a page.</small>
+
+  <label for="file">Audio to speak (WAV, MP3, M4A, whatever your browser decodes)</label>
+  <input id="file" type="file" accept="audio/*">
+  <p>
+    <button id="connect" type="button">Connect</button>
+    <button id="send" type="button" disabled>Send test line</button>
+    <button id="stop" type="button" disabled>Interrupt</button>
+  </p>
+
+  <canvas id="face" width="512" height="512" role="img" aria-label="The avatar's face"></canvas>
+  <div id="status" role="status" aria-live="polite">Not connected.</div>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const RATE = 24000, LEAD = 0.25;                          // PCM sample rate; seconds buffered before the first chunk
+let ws, decoder, actx, t0 = null, needKey = true, lastAsk = 0, sources = [], frames = [], codec, lineNo = 0;
+const g = $("face").getContext("2d");
+
+function say(text) { $("status").textContent = text; }
+const b64bytes = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+function bytesB64(u8) { let s = ""; for (let i = 0; i < u8.length; i += 8192) s += String.fromCharCode(...u8.subarray(i, i + 8192)); return btoa(s); }
+const send = ev => ws && ws.readyState === 1 && ws.send(JSON.stringify(ev));
+
+if (typeof VideoDecoder === "undefined") {
+  say("This browser has no WebCodecs VideoDecoder, so it cannot decode H.264 here. Try a current Chrome, Edge, Safari or Firefox.");
+  $("connect").disabled = true;
+}
+
+// ---- decoder: one EncodedVideoChunk per access unit; an error or an interrupt starts over at the next keyframe
+function startDecoder() {
+  if (decoder && decoder.state !== "closed") decoder.close();
+  decoder = new VideoDecoder({
+    output: f => frames.push(f),                          // f.timestamp is the stream time in microseconds
+    error: e => { say("Decoder error: " + e.message + ". Asking for a keyframe."); needKey = true; startDecoder(); askKeyframe(true); }
+  });
+  decoder.configure({ codec, optimizeForLatency: true, avc: { format: "annexb" } });
+  needKey = true;
+}
+function askKeyframe(force) {                             // at most once a second
+  const now = performance.now();
+  if (force || now - lastAsk > 1000) { lastAsk = now; send({ type: "avatar.video.keyframe" }); }
+}
+function dropAll() {                                      // interrupt: forget video and audio that are queued
+  frames.forEach(f => f.close()); frames = [];
+  sources.forEach(s => { try { s.stop(); } catch (e) {} }); sources = [];
+  t0 = null;
+  startDecoder();
+}
+
+// ---- one video event: audio is the clock, frame i is due at audio_start_ms + i * 1000 / fps
+function onChunk(ev) {
+  if (!ev.speech || !decoder) return;
+  const first = ev.audio_start_ms / 1000;
+  if (t0 === null) t0 = actx.currentTime + LEAD - first;  // map the stream clock to the audio clock once
+  else if (t0 + first < actx.currentTime) t0 = actx.currentTime - first + 0.02;      // late chunk: move the clock, keep the audio whole
+  if (ev.audio) {
+    const pcm = new Int16Array(b64bytes(ev.audio).buffer);
+    const buf = actx.createBuffer(1, pcm.length, ev.audio_sample_rate || RATE);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+    const src = actx.createBufferSource();
+    src.buffer = buf; src.connect(actx.destination); src.start(t0 + first);
+    src.onended = () => { sources = sources.filter(s => s !== src); };
+    sources.push(src);
+  }
+  const all = b64bytes(ev.video), keys = new Set(ev.keyframes);
+  let pos = 0;
+  ev.frame_sizes.forEach((size, i) => {
+    const unit = all.subarray(pos, pos += size), key = keys.has(i);
+    if (needKey && !key) { askKeyframe(false); return; }  // join at a keyframe, never mid-GOP
+    needKey = false;
+    try {
+      decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: (ev.audio_start_ms + i * 1000 / ev.fps) * 1000, data: unit }));
+    } catch (e) { needKey = true; startDecoder(); askKeyframe(true); }
+  });
+}
+
+// ---- draw: show the newest frame whose time has come on the audio clock; older ones are late and dropped
+function draw() {
+  if (t0 !== null) {
+    const now = (actx.currentTime - t0) * 1e6;
+    let pick = null;
+    while (frames.length && frames[0].timestamp <= now) { if (pick) pick.close(); pick = frames.shift(); }
+    if (pick) { g.drawImage(pick, 0, 0, $("face").width, $("face").height); pick.close(); }
+  }
+  requestAnimationFrame(draw);
+}
+
+// ---- connect
+$("connect").onclick = () => {
+  const secret = $("secret").value.trim();
+  if (!secret) { say("Paste a client secret first."); return; }
+  actx = actx || new AudioContext({ sampleRate: RATE });  // created in a click: browsers allow audio then
+  actx.resume();
+  say("Connecting...");
+  ws = new WebSocket("wss://api.newera.ai/v1/avatar?mode=render-audio&video_format=h264", ["realtime", "newera-client-secret." + secret]);
+  ws.onopen = () => send({ type: "session.update", session: { avatar: "lama" } });
+  ws.onmessage = m => {
+    const ev = JSON.parse(m.data);
+    if (ev.type === "avatar.ready") {
+      if (ev.video_format !== "h264") { say("The server answered " + ev.video_format + ", not h264."); ws.close(); return; }
+      codec = ev.video.codec;
+      $("face").width = ev.width; $("face").height = ev.height;
+      startDecoder();
+    } else if (ev.type === "session.created") { say("Connected. Pick an audio file and send it."); $("send").disabled = $("stop").disabled = false; }
+    else if (ev.type === "response.video.chunk") onChunk(ev);
+    else if (ev.type === "avatar.interrupted") { dropAll(); say("Interrupted."); }
+    else if (ev.type === "avatar.line.started") say("Speaking...");
+    else if (ev.type === "avatar.line.done") say("Line " + ev.status + ".");
+    else if (ev.type === "error") say("Error: " + ev.error.code + " - " + ev.error.message);
+  };
+  ws.onclose = e => { say("Closed (" + e.code + (e.reason ? ", " + e.reason : "") + ")."); $("send").disabled = $("stop").disabled = true; };
+  ws.onerror = () => say("Connection error.");
+};
+
+// ---- the test line: decode the file, resample to 24 kHz mono, send as PCM16 pieces of 0.5 s, then end the line
+$("send").onclick = async () => {
+  const file = $("file").files[0];
+  if (!file) { say("Choose an audio file first."); return; }
+  try {
+    say("Preparing audio...");
+    const src = await new AudioContext().decodeAudioData(await file.arrayBuffer());
+    const off = new OfflineAudioContext(1, Math.ceil(src.duration * RATE), RATE);   // resamples and mixes to mono
+    const node = off.createBufferSource();
+    node.buffer = src; node.connect(off.destination); node.start();
+    const f32 = (await off.startRendering()).getChannelData(0), pcm = new Int16Array(f32.length);
+    for (let i = 0; i < f32.length; i++) pcm[i] = Math.max(-1, Math.min(1, f32[i])) * 32767;
+    const id = "line-" + (++lineNo), step = RATE / 2;
+    for (let i = 0; i < pcm.length; i += step)
+      send({ type: "avatar.line.append", line_id: id, audio: bytesB64(new Uint8Array(pcm.slice(i, i + step).buffer)) });
+    send({ type: "avatar.line.end", line_id: id });
+    say("Sent " + (pcm.length / RATE).toFixed(1) + " s of audio.");
+  } catch (e) { say("Could not read that audio file: " + e.message); }
+};
+$("stop").onclick = () => send({ type: "avatar.interrupt" });
+
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

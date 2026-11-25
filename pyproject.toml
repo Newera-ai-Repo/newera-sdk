@@ -21,6 +21,7 @@ dependencies = ["websockets>=14", "certifi>=2023.7.22"]
 
 [project.optional-dependencies]
 avatar = ["sounddevice>=0.4.6", "pygame-ce>=2.5"]
+h264 = ["av>=14"]
 test = ["pytest>=7"]
 
 [project.scripts]

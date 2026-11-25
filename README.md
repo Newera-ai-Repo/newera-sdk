@@ -53,6 +53,8 @@ For the live avatar call (microphone, speaker, window) install the extra:
 pip install "newera-sdk[avatar]"
 ```
 
+For the smaller H.264 video format (see [H.264 video](#h264-video-opt-in)) add `pip install "newera-sdk[h264]"`.
+
 ## The avatar
 
 A talking face that answers by voice, in real time: you stream the caller's audio in and get the
@@ -178,6 +180,56 @@ Browsers: `await client.avatar.create_session(mode="render-text")` checks your a
 
 Examples: [`avatar_render_audio.py`](examples/avatar_render_audio.py), [`avatar_render_text.py`](examples/avatar_render_text.py).
 
+### H.264 video (opt-in)
+
+By default the face arrives as JPEG frames, about 5.6 Mbit/s. Ask for H.264 and the same call needs about 0.7
+Mbit/s, which matters on mobile networks and for many calls at once. It is opt-in and nothing changes unless you
+ask; the audio, timestamps, lines and interrupts are identical.
+
+```python
+async with client.avatar.connect(mode="render-audio", video_format="h264", record=True) as call:
+    ...                                    # VideoChunk.units: one Annex-B access unit per frame
+    call.save_mp4("out.mp4")               # the received video muxed as it is, no re-encode
+```
+
+It needs PyAV to decode, which is not installed by default (a binary wheel with FFmpeg inside; JPEG users never need it):
+`pip install "newera-sdk[h264]"`. It is a separate extra from `[avatar]` on purpose, so that extra stays small;
+install both with `pip install "newera-sdk[avatar,h264]"`. Without PyAV, `connect(video_format="h264")` raises
+`AvatarError("av_not_installed")` immediately, before any call is made. An unknown value is a `ValueError`; the
+server's `invalid_video_format` is an `InvalidRequest` and `video_format_unavailable` an `AvatarUnavailable`.
+`create_session(video_format="h264")` only checks the value and that this gateway can serve it; the page still
+opens the socket with `&video_format=h264` itself.
+
+What you get:
+
+* `avatar.ready` has `call.ready.video` (`{"codec": "avc1.4D401F", "stream": "annexb", "gop_frames": 50, ...}`,
+  `None` for JPEG) and `call.video_format`.
+* A `VideoChunk` of an h264 call has `video_format == "h264"`, `units` (one access unit per frame, in stream
+  order), `keyframes` (the indices within the chunk of the IDR units) and `frame_count`; `frames` is empty. The
+  timestamps and `audio` are the same as for JPEG: frame `i` is due at `audio_start_ms + i * 1000 / fps`.
+* `newera.h264.H264Decoder` turns chunks into `DecodedFrame`s (`rgb` as RGB24 bytes, `width`, `height`,
+  `index`, `to_ndarray()` with numpy, `to_jpeg(quality=90)` with Pillow or else PyAV). It follows the stream's
+  rules: it starts at a keyframe (units before the first one are dropped), starts clean at every later keyframe,
+  counts a unit that fails to decode in `decoder.errors` and then waits for the next keyframe, and calls
+  `on_lost` so you can ask for one. `decoder.reset()` forgets the picture (do it on `Interrupted`). Never skip a
+  unit yourself: the server forces a keyframe on the first frame, after an interrupt, after any gap, every 50
+  frames and on request, and only those are places to join.
+* `await call.request_keyframe()` sends `avatar.video.keyframe`; it does nothing on a JPEG call.
+* `LipSyncPlayer` plays h264 with the same clock as JPEG. Its `show_frame(frame, n)` receives a `DecodedFrame` (or
+  JPEG bytes with `frame_format="jpeg"`; for a JPEG call it still receives JPEG bytes). The decode runs on a worker
+  thread, in order, so the event loop is not blocked; on `Interrupted` it resets the decoder; pass
+  `request_keyframe=call.request_keyframe` and it asks for a keyframe when the decoder loses the picture.
+* `newera avatar --video h264` plays it in the pygame window.
+* `call.save_mp4(path)` of an h264 call does not re-encode the video: the access units are muxed as received, with
+  timestamps from the frame numbers (a frame that never came leaves a gap and nothing is repeated; gaps longer than a
+  second are shortened), starting at the first keyframe; only the audio is encoded (PCM to AAC), with PyAV
+  instead of ffmpeg. `call.save_h264(path)` writes the raw Annex-B stream, `call.save_frames(dir)` decodes to JPEG
+  files. The JPEG behaviour of every `save_*` is unchanged.
+
+Examples: [`avatar_h264.py`](examples/avatar_h264.py) (render-audio, prints the bandwidth, saves `out.mp4`), and
+[`browser/avatar_h264.html`](examples/browser/avatar_h264.html), one file of plain HTML and JavaScript that decodes
+the stream with the browser's WebCodecs `VideoDecoder` and plays the audio on the same clock.
+
 ### Errors
 
 A call can be refused or ended; handle these errors, all `NeweraError`s:
@@ -185,12 +237,12 @@ A call can be refused or ended; handle these errors, all `NeweraError`s:
 | exception | when |
 |---|---|
 | `AvatarBusy` | the avatar can't take this call right now: try again after `.retry_after_s` seconds (may be None) |
-| `AvatarUnavailable` | the face or Newera Core is temporarily unavailable |
+| `AvatarUnavailable` | the face or Newera Core is temporarily unavailable (also `video_format_unavailable`: connect with the default JPEG) |
 | `NotEnabled` | the organisation is not enabled for this avatar product (conversational and render are separate) or the voice model |
 | `AuthenticationError` | missing or wrong key, or a used or expired client secret |
 | `InsufficientQuota` | the prepaid balance cannot cover the call |
 | `RateLimited` | too many requests, or too many calls on this key right now |
-| `InvalidRequest` | a bad session field or model (`invalid_avatar_image`: no usable face in the photo) |
+| `InvalidRequest` | a bad session field or model (`invalid_avatar_image`: no usable face in the photo; `invalid_video_format`) |
 | `CallTimeLimit` | the service ended the call |
 | `WrongMode` | an event of another mode (audio line in render-text, a line in conversational) |
 | `LineError` | a refused line: bad or duplicate `line_id`, too many queued lines, line too long, bad audio or text |
@@ -361,6 +413,9 @@ real avatar and is skipped unless `NEWERA_API_KEY` is set (use a key enabled for
 
 ## Release notes
 
+* Unreleased: opt-in H.264 video (`video_format="h264"`, about 0.7 instead of 5.6 Mbit/s): `newera.h264.H264Decoder`,
+  h264 in `LipSyncPlayer` and `newera avatar --video h264`, `call.request_keyframe()`, `save_mp4` without re-encoding,
+  `save_h264`. Optional extra `newera-sdk[h264]` (PyAV). JPEG calls are unchanged and never load PyAV.
 * 0.4.0: render modes (`mode="render-audio"` and `"render-text"`) with lines, `interrupt()`, line events, video
   timestamps (`audio_start_ms`, `audio_end_ms`, `line_id`), `LipSyncPlayer`, `retry_after_s`, new typed errors. Additive: conversational calls are unchanged.
 * 0.3.1: documentation and message wording for the avatar. No change in behaviour.

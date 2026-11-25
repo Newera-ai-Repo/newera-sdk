@@ -10,6 +10,7 @@ from .avatar import (AudioDelta, Availability, AvatarBusy, AvatarCall, AvatarErr
                      ReplyText, ReplyTextDelta, ResponseDone, SessionSummary, SpeechStarted, SpeechStopped,
                      Timeline, Unavailable, UserTranscript, VideoChunk, WrongMode)
 from .client import Newera
+from .h264 import DecodedFrame, H264Decoder
 from .player import LipSyncPlayer
 from .schema import function_schema, type_schema
 
@@ -29,5 +30,5 @@ __all__ = ["VoiceAgent", "Call", "Event", "Reply", "ToolSpec", "NeweraError", "D
            "ErrorEvent", "OtherEvent",
            "AvatarError", "InvalidRequest", "AuthenticationError", "InsufficientQuota", "NotEnabled",
            "CallTimeLimit", "RateLimited", "AvatarBusy", "AvatarUnavailable",
-           "WrongMode", "LineError", "Line", "LineStarted", "LineDone", "LipSyncPlayer"]
+           "WrongMode", "LineError", "Line", "LineStarted", "LineDone", "LipSyncPlayer", "H264Decoder", "DecodedFrame"]
 __version__ = "0.4.0"
