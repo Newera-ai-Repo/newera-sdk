@@ -18,6 +18,14 @@ from newera.avatar import AUDIO_RATE, error_for, parse_event
 FRAME_BYTES = AUDIO_RATE // 25 * 2
 
 
+def bare(path):
+    """A request path without the video_format and output options (every call sends them, see test_avatar_output.py)."""
+    from urllib.parse import parse_qsl, urlencode, urlsplit
+    u = urlsplit(path)
+    q = [(k, v) for k, v in parse_qsl(u.query) if k not in ("video_format", "output")]
+    return u.path + ("?" + urlencode(q) if q else "")
+
+
 def b64(b: bytes) -> str:
     return base64.b64encode(b).decode()
 
@@ -185,7 +193,7 @@ def test_render_audio_line_streams_audio_and_reports_events():
     async def go():
         async with FakeRender() as srv:
             async with client_for(srv).avatar.connect("lama", mode="render-audio", idle_video=True) as call:
-                assert srv.paths[0] == "/v1/avatar?mode=render-audio"           # no model in a render mode
+                assert bare(srv.paths[0]) == "/v1/avatar?mode=render-audio"           # no model in a render mode
                 assert srv.received[0] == {"type": "session.update",
                                            "session": {"avatar": "lama", "avatar_idle_video": True}}
                 assert call.mode == "render-audio" and call.ready.mode == "render-audio"
@@ -238,7 +246,7 @@ def test_render_text_sends_exact_text_and_voice():
     async def go():
         async with FakeRender() as srv:
             async with client_for(srv).avatar.connect(mode="render-text") as call:
-                assert srv.paths[0] == "/v1/avatar?mode=render-text"
+                assert bare(srv.paths[0]) == "/v1/avatar?mode=render-text"
                 assert "voice" not in srv.received[0]["session"]
                 a = await call.speak("مرحبا, welcome!", "t1", voice="female")
                 b = await call.speak("second line", "t2")
@@ -386,7 +394,7 @@ def test_client_secret_flow_for_render_mode():
             async with client.avatar.connect(client_secret=ClientSecret("avs_q", 1, "newera-s2s", "render-text")) as call:
                 assert call.mode == "render-text"
             assert srv.protocols[0] == "realtime, newera-client-secret.avs_q"
-            assert srv.paths[0] == "/v1/avatar?mode=render-text" and "authorization" not in srv.headers[0]
+            assert bare(srv.paths[0]) == "/v1/avatar?mode=render-text" and "authorization" not in srv.headers[0]
     run(go())
 
 

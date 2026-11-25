@@ -151,7 +151,7 @@ async def _drive(opts: dict, player: Playback, status: Status, stop: asyncio.Eve
                 opts.get("avatar") or "lama", voice=opts.get("voice") or "female", language=opts.get("language"),
                 model=opts.get("model") or "newera-s2s", image=opts.get("image"), idle_video=bool(opts.get("idle_video")),
                 instructions=opts.get("instructions"), record=bool(opts.get("record")),
-                video_format=opts.get("video_format") or "jpeg") as call:
+                video_format=opts.get("video_format"), output=opts.get("output")) as call:
             loop = asyncio.get_running_loop()
             if not opts.get("mute"):
                 out_stream = _open_output(player)
@@ -321,6 +321,14 @@ def _open_input(loop, q: asyncio.Queue, device: Any = None):
     return stream
 
 
+def _fit(width: int, height: int, longer: int) -> tuple[int, int]:
+    """The size of a window that shows a width x height picture with its longer side `longer` (same shape)."""
+    if width <= 0 or height <= 0:
+        return longer, longer
+    scale = longer / max(width, height)
+    return max(1, round(width * scale)), max(1, round(height * scale))
+
+
 def _run_window(done: threading.Event, request_stop, player: Playback, status: Status, opts: dict) -> None:
     """The window, on the main thread (macOS needs it there): show each frame when its time comes."""
     os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
@@ -329,8 +337,9 @@ def _run_window(done: threading.Event, request_stop, player: Playback, status: S
     except ImportError:
         raise SystemExit(INSTALL_HINT)
     pygame.init()
-    size = int(opts.get("window_size") or 512)
-    screen = pygame.display.set_mode((size, size))
+    size = int(opts.get("window_size") or 512)            # the longer side of the window
+    win = (size, size)
+    screen = pygame.display.set_mode(win)
     pygame.display.set_caption("Newera avatar (Esc or Ctrl+C to end)")
     font = pygame.font.Font(None, 26)
     clock = pygame.time.Clock()
@@ -352,16 +361,20 @@ def _run_window(done: threading.Event, request_stop, player: Playback, status: S
                     else:                           # an h264 call: a DecodedFrame of RGB24
                         surface = pygame.image.frombuffer(jpeg.rgb, (jpeg.width, jpeg.height), "RGB").copy()
                     shown += 1
+                    want = _fit(surface.get_width(), surface.get_height(), size)
+                    if want != win:                 # the picture is not square (output="original"): the window is its shape
+                        win = want
+                        screen = pygame.display.set_mode(win)
                 except pygame.error:
                     pass
             screen.fill((18, 18, 20))
             if surface is not None:
-                screen.blit(pygame.transform.smoothscale(surface, (size, size)) if surface.get_width() != size else surface, (0, 0))
+                screen.blit(pygame.transform.smoothscale(surface, win) if surface.get_size() != win else surface, (0, 0))
                 label = font.render(status.text, True, (240, 240, 240), (0, 0, 0))
-                screen.blit(label, (10, size - label.get_height() - 8))
+                screen.blit(label, (10, win[1] - label.get_height() - 8))
             else:
                 label = font.render(status.text, True, (200, 200, 200))
-                screen.blit(label, ((size - label.get_width()) // 2, size // 2))
+                screen.blit(label, ((win[0] - label.get_width()) // 2, win[1] // 2))
             pygame.display.flip()
             if shot_dir and shown and shots < 4 and time.monotonic() - last_shot > 1.5 and status.text == "Speaking":
                 os.makedirs(shot_dir, exist_ok=True)
@@ -379,19 +392,20 @@ def talk(*, api_key: str | None = None, avatar: str = "lama", image: str | None 
          idle_video: bool = False, input_file: str | None = None, window: bool = True, mute: bool = False,
          prebuffer: float = 2.0, record: str | None = None, base_url: str | None = None,
          input_device: Any = None, window_size: int = 512, screenshot_dir: str | None = None,
-         max_seconds: float = 120.0, video_format: str = "jpeg") -> int:
+         max_seconds: float = 120.0, video_format: str | None = None, output: str | None = None) -> int:
     """An interactive call with the avatar: the microphone is the caller, the speaker plays the avatar, a window
     shows the face and the transcript is printed here. Returns the exit code (0 when it ended normally).
 
     `input_file` replays a WAV as the caller instead of the microphone, and ends the call after the reply.
-    `video_format="h264"` asks for the H.264 video (about a eighth of the data; needs PyAV, see `newera.h264`)."""
+    `video_format` is "h264" (the default) or "jpeg"; `output` is "original" (the default: the video has the size
+    of your `image`) or "square" (512 x 512). The window takes the shape of the picture."""
     player, status = Playback(prebuffer=prebuffer), Status()
     result: dict = {"code": 1}
     holder: dict = {}
     opts = dict(api_key=api_key, avatar=avatar, image=image, voice=voice, language=language, model=model,
                 instructions=instructions, idle_video=idle_video, input_file=input_file, mute=mute, record=record,
                 base_url=base_url, input_device=input_device, window_size=window_size, screenshot_dir=screenshot_dir,
-                max_seconds=max_seconds, video_format=video_format)
+                max_seconds=max_seconds, video_format=video_format, output=output)
     print_lock = threading.Lock()
 
     def out(text: str) -> None:

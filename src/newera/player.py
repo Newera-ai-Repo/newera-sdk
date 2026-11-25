@@ -20,7 +20,7 @@ h264: the player decodes every chunk in stream order on one worker thread (the e
 are decoded as soon as they are fed, ahead of their time), including idle chunks you do not show, because the decoder
 may not skip a unit. The clock logic is the same as for JPEG. Pass `request_keyframe=call.request_keyframe` and the
 player asks the server for a keyframe when its decoder loses the picture; on `Interrupted` it resets the decoder (the
-server sends a keyframe next). Needs PyAV (`pip install "newera-sdk[h264]"`). For production use with a particular audio device, adapt it to that device's
+server sends a keyframe next). Needs PyAV (installed with the SDK). For production use with a particular audio device, adapt it to that device's
 own clock; `talk.Playback` is the device version for `newera avatar`.
 """
 

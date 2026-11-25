@@ -31,4 +31,4 @@ __all__ = ["VoiceAgent", "Call", "Event", "Reply", "ToolSpec", "NeweraError", "D
            "AvatarError", "InvalidRequest", "AuthenticationError", "InsufficientQuota", "NotEnabled",
            "CallTimeLimit", "RateLimited", "AvatarBusy", "AvatarUnavailable",
            "WrongMode", "LineError", "Line", "LineStarted", "LineDone", "LipSyncPlayer", "H264Decoder", "DecodedFrame"]
-__version__ = "0.4.0"
+__version__ = "0.5.0"

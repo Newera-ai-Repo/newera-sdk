@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "newera-sdk"
-version = "0.4.0"
+version = "0.5.0"
 description = "Newera SDK: speech-to-speech voice calls where Python functions are the tools, and a talking avatar."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -17,11 +17,11 @@ classifiers = [
   "Topic :: Multimedia :: Sound/Audio :: Speech",
   "Intended Audience :: Developers",
 ]
-dependencies = ["websockets>=14", "certifi>=2023.7.22"]
+dependencies = ["websockets>=14", "certifi>=2023.7.22", "av>=14"]
 
 [project.optional-dependencies]
 avatar = ["sounddevice>=0.4.6", "pygame-ce>=2.5"]
-h264 = ["av>=14"]
+h264 = []                          # kept so `pip install "newera-sdk[h264]"` still works: PyAV is a dependency now
 test = ["pytest>=7"]
 
 [project.scripts]

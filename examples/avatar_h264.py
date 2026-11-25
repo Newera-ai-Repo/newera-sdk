@@ -1,6 +1,6 @@
-"""Render-audio over H.264: about 0.7 Mbit/s of video instead of about 5.6 Mbit/s of JPEG.
+"""Render-audio over H.264 (the default video): about 0.7 Mbit/s of video instead of about 5.6 Mbit/s of JPEG.
 
-    pip install "newera-sdk[h264]"            # PyAV decodes and muxes H.264
+    pip install newera-sdk                    # PyAV (which decodes and muxes H.264) comes with it
     export NEWERA_API_KEY=nwc_live_...
 
     python avatar_h264.py speech.wav          # any 16-bit PCM WAV; saved as out.mp4
@@ -29,7 +29,8 @@ async def pieces(pcm: bytes, ms: int = 200):
 async def main(args):
     client = Newera()                                # NEWERA_API_KEY from the environment
     # video_format="h264" fails right here, before any call, when PyAV is not installed.
-    async with client.avatar.connect(avatar="lama", mode="render-audio", video_format="h264", record=True) as call:
+    async with client.avatar.connect(avatar="lama", mode="render-audio", video_format="h264", output="square",
+                                     record=True) as call:
         print("codec", call.ready.video["codec"], "keyframe every", call.ready.video["gop_frames"], "frames")
         stats = {"bytes": 0, "frames": 0, "keyframes": 0}
 

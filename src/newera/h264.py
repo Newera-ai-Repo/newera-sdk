@@ -8,8 +8,8 @@
             for frame in decoder.decode(ev):          # DecodedFrame, in display order
                 show(frame.rgb, frame.width, frame.height)
 
-PyAV (`pip install "newera-sdk[h264]"`) is an optional dependency, imported only when a stream is really decoded or
-muxed: importing this module, and every JPEG call, never loads it.
+PyAV is a dependency of the SDK, imported only when a stream is really decoded or muxed: importing this module, and
+every JPEG call, never loads it.
 
 The stream rules (see `VideoChunk`): access units are decoded in stream order and none is skipped, except when the
 decoder joins or recovers at a keyframe (SPS and PPS are in front of every keyframe). So `H264Decoder` drops units
@@ -30,7 +30,7 @@ from typing import Any, Callable, Iterable
 
 from .avatar import AvatarError
 
-INSTALL_HINT = 'H.264 video needs PyAV: pip install "newera-sdk[h264]"'
+INSTALL_HINT = 'H.264 video needs PyAV: pip install av (it is a dependency of newera-sdk; reinstall it with pip install -U newera-sdk)'
 
 
 def require_av():

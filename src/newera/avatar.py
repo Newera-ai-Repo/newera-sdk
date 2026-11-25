@@ -31,6 +31,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 import wave
 from array import array
 from typing import Any, AsyncIterator, Callable, Iterable
@@ -43,7 +44,10 @@ DEFAULT_BASE_URL = "https://api.newera.ai"
 MODELS = ("newera-s2s", "newera-s2s-mini")
 MODES = ("conversational", "render-audio", "render-text")
 VOICES = ("male", "female")
-VIDEO_FORMATS = ("jpeg", "h264")
+VIDEO_FORMATS = ("h264", "jpeg")
+OUTPUTS = ("original", "square")
+DEFAULT_VIDEO_FORMAT = "h264"
+DEFAULT_OUTPUT = "original"
 FPS = 25
 AUDIO_RATE = 24000
 CHUNK_MS = 20                       # microphone block: 20 ms, as the protocol recommends
@@ -63,7 +67,7 @@ class AvatarError(NeweraError):
 
 
 class InvalidRequest(AvatarError):
-    """4400: a bad session field or model (invalid_avatar, invalid_avatar_image, invalid_model, invalid_video_format)."""
+    """4400: a bad session field or model (invalid_avatar, invalid_avatar_image, invalid_model, invalid_video_format, invalid_output)."""
 
 
 class AuthenticationError(AvatarError):
@@ -116,7 +120,7 @@ _BY_CODE = {
     "avatar_busy": AvatarBusy, "avatar_unavailable": AvatarUnavailable, "model_unavailable": AvatarUnavailable,
     "avatar_concurrency_limit": RateLimited, "session_time_limit": CallTimeLimit,
     "invalid_mode": InvalidRequest, "wrong_mode": WrongMode,
-    "invalid_video_format": InvalidRequest, "video_format_unavailable": AvatarUnavailable,
+    "invalid_video_format": InvalidRequest, "invalid_output": InvalidRequest, "video_format_unavailable": AvatarUnavailable,
     "invalid_line_id": LineError, "duplicate_line": LineError, "too_many_lines": LineError,
     "line_too_long": LineError, "invalid_audio": LineError, "invalid_text": LineError, "text_too_long": LineError,
 }
@@ -156,6 +160,8 @@ class AvatarReady(AvatarEvent):
     frames_per_event: int = 7
     mode: str = "conversational"
     video: dict | None = None           # h264 only: {"codec": "avc1.4D401F", "stream": "annexb", "gop_frames": 50, ...}
+    output: str = "square"              # the output the call really has: "original" (your photo's size) or "square" (512 x 512)
+    output_reason: str | None = None    # why "original" was not possible, when you asked for it and got "square"
 
 
 @dataclasses.dataclass
@@ -347,6 +353,7 @@ def parse_event(data: dict) -> AvatarEvent:
                            height=int(data.get("height") or 512), video_format=data.get("video_format", "jpeg"),
                            audio_sample_rate=int(data.get("audio_sample_rate") or AUDIO_RATE),
                            frames_per_event=int(data.get("frames_per_event") or 7),
+                           output=data.get("output") or "square", output_reason=data.get("output_reason"),
                            mode=data.get("mode") or "conversational",
                            video=data.get("video") if isinstance(data.get("video"), dict) else None)
     if t == "avatar.interrupted":
@@ -664,14 +671,17 @@ class ClientSecret:
     expires_at: int
     model: str
     mode: str = "conversational"
-    video_format: str = "jpeg"
+    video_format: str | None = None     # what the secret was made for; None = the server's default (h264)
+    output: str | None = None           # likewise: None = the server's default (original)
 
     def as_dict(self) -> dict:
         d = {"client_secret": {"value": self.value, "expires_at": self.expires_at}, "model": self.model}
         if self.mode != "conversational":
             d["mode"] = self.mode
-        if self.video_format != "jpeg":
+        if self.video_format:
             d["video_format"] = self.video_format
+        if self.output:
+            d["output"] = self.output
         return d
 
 
@@ -698,35 +708,41 @@ class Avatar:
         return Availability(busy=bool(data.get("busy")), available=bool(data.get("available", True)))
 
     async def create_session(self, model: str = "newera-s2s", *, mode: str = "conversational",
-                             video_format: str = "jpeg") -> ClientSecret:
+                             video_format: str | None = None, output: str | None = None) -> ClientSecret:
         """Trade the API key for a client secret (`avs_...`, one use, 60 seconds) that a browser opens the
         WebSocket with; call it from your server, never from a page. `mode` is checked against your
         entitlements now (the page still opens the socket with `?mode=` itself). `model` is for conversational.
-        `video_format="h264"` only checks that this gateway can serve it (the page opens the socket with
-        `&video_format=h264` itself)."""
+        `video_format` ("h264" or "jpeg") and `output` ("original" or "square") are checked now and kept in the
+        secret as the socket's defaults (the page may still pass `&video_format=` / `&output=` itself); left out,
+        the server's defaults apply (h264, original)."""
         _check_mode(mode)
-        _check_video_format(video_format)
+        if video_format is not None:
+            _check_video_format(video_format)
+        if output is not None:
+            _check_output(output)
         body: dict = {}
         if mode == "conversational":
             _check_model(model)
             body["model"] = model
         else:
             body["mode"] = mode
-        if video_format != "jpeg":
+        if video_format is not None:
             body["video_format"] = video_format
+        if output is not None:
+            body["output"] = output
         data = await asyncio.to_thread(self._client._http, "POST", "/v1/avatar/sessions", body)
         secret = data.get("client_secret") or {}
         if not secret.get("value"):
             raise AvatarError("invalid_response", "The server did not return a client secret.")
         return ClientSecret(value=secret["value"], expires_at=int(secret.get("expires_at") or 0),
                             model=data.get("model") or model, mode=data.get("mode") or mode,
-                            video_format=data.get("video_format") or video_format)
+                            video_format=video_format, output=output)
 
     def connect(self, avatar: str = "lama", *, voice: str = "female", language: str | None = None,
                 model: str = "newera-s2s", image: Any = None, face_crop: bool = True, idle_video: bool = False,
                 instructions: str | None = None, input_sample_rate: int = AUDIO_RATE, record: bool = False,
                 client_secret: str | ClientSecret | None = None, mode: str | None = None,
-                video_format: str | None = None, **realtime_settings) -> "_Connect":
+                video_format: str | None = None, output: str | None = None, **realtime_settings) -> "_Connect":
         """Open a call: `async with client.avatar.connect(...) as call:`.
 
         mode           "conversational" (default: the avatar listens and answers), "render-audio" (you stream
@@ -745,14 +761,21 @@ class Avatar:
         idle_video     also stream the face while it listens (about ten times the data).
         record         keep every frame and its audio so `call.save_mp4()` works (about 1 MB per second of video).
         client_secret  connect with a secret from `create_session()` instead of the API key.
-        video_format   "jpeg" (default: JPEG frames, about 5.6 Mbit/s) or "h264" (H.264 access units, about 0.7
-                       Mbit/s; decode them with `newera.h264.H264Decoder` or play them with `LipSyncPlayer`).
-                       h264 needs PyAV (`pip install "newera-sdk[h264]"`); a missing PyAV is an error right here.
+        video_format   "h264" (default: H.264 access units, under 1 Mbit/s; decoded with PyAV, which the SDK installs;
+                       `newera.h264.H264Decoder` or `LipSyncPlayer` do it for you) or "jpeg" (JPEG frames, several
+                       times the data; no decoder needed).
+        output         "original" (default) or "square". "original": the video has the size and framing of the photo
+                       you pass as `image` (longest side at most 1280 px), the face animated in place and nothing
+                       else moving. "square": the 512 x 512 face only. Without an `image` (a preset face), or when
+                       the face cannot be placed in the photo, the call is served "square": see
+                       `call.ready.output` and `call.ready.output_reason`.
         realtime_settings  anything else of the realtime `session.update` (turn_detection, tools, ...).
         """
         _check_model(model)
         if video_format is not None:
             _check_video_format(video_format)
+        if output is not None:
+            _check_output(output)
         if voice is not None and voice not in VOICES:
             raise ValueError("voice must be one of %s, not %r" % (", ".join(VOICES), voice))
         if language not in (None, "auto", "ar", "en"):
@@ -760,10 +783,17 @@ class Avatar:
         if isinstance(client_secret, ClientSecret):
             mode = mode or client_secret.mode
             video_format = video_format or client_secret.video_format
+            output = output or client_secret.output
             model, client_secret = client_secret.model, client_secret.value
         mode = mode or "conversational"
         _check_mode(mode)
-        video_format = video_format or "jpeg"
+        output = output or DEFAULT_OUTPUT
+        if video_format is None:
+            video_format = DEFAULT_VIDEO_FORMAT
+            if not _has_av():                # PyAV is a dependency; a stripped-down install still gets video
+                warnings.warn("PyAV (av) is not installed, so the call uses video_format=\"jpeg\"; "
+                              "pip install av for H.264.", stacklevel=2)
+                video_format = "jpeg"
         if video_format == "h264":
             from .h264 import require_av
             require_av()                    # before any connection: a missing PyAV must not surface mid-call
@@ -776,7 +806,20 @@ class Avatar:
                 raise ValueError("language, instructions, model, input_sample_rate and realtime settings are for "
                                  "conversational mode; the render modes take only the face options.")
             session = build_session(avatar=avatar, voice=None, image=image, face_crop=face_crop, idle_video=idle_video)
-        return _Connect(self._client, session, model, record, client_secret, mode, video_format)
+        return _Connect(self._client, session, model, record, client_secret, mode, video_format, output)
+
+
+def _has_av() -> bool:
+    try:
+        import av  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _check_output(output: str) -> None:
+    if output not in OUTPUTS:
+        raise ValueError("output must be one of %s, not %r" % (", ".join(OUTPUTS), output))
 
 
 def _check_video_format(video_format: str) -> None:
@@ -832,10 +875,11 @@ def _image_b64(image: Any) -> str:
 
 class _Connect:
     def __init__(self, client, session: dict, model: str, record: bool, secret: str | None,
-                 mode: str = "conversational", video_format: str = "jpeg"):
+                 mode: str = "conversational", video_format: str = DEFAULT_VIDEO_FORMAT, output: str = DEFAULT_OUTPUT):
         self.client, self.session, self.model, self.record, self.secret = client, session, model, record, secret
         self.mode = mode
         self.video_format = video_format
+        self.output = output
         self.call: AvatarCall | None = None
 
     def __await__(self):
@@ -853,8 +897,8 @@ class _Connect:
                 query["model"] = self.model
         if self.mode != "conversational":
             query["mode"] = self.mode          # the secret does not carry the mode: it is always in the URL
-        if self.video_format != "jpeg":
-            query["video_format"] = self.video_format
+        query["video_format"] = self.video_format      # always said, so a server's own defaults cannot surprise the call
+        query["output"] = self.output
         if query:
             url += "?" + urllib.parse.urlencode(query)
         ctx = self.client._ssl_context()

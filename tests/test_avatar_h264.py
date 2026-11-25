@@ -128,19 +128,22 @@ def fake_av(monkeypatch):
 
 # ------------------------------------------------------------------------------- option, URL, errors
 
-def test_default_jpeg_url_and_session_are_unchanged(monkeypatch):
+def test_jpeg_url_and_session_without_pyav(monkeypatch):
     monkeypatch.setitem(sys.modules, "av", None)                       # a JPEG call never needs PyAV
 
     async def go():
         async with FakeServer(h264=False) as srv:
-            async with srv.client().avatar.connect(mode="render-audio") as call:
-                assert call.video_format == "jpeg" and call.ready.video is None
+            with pytest.warns(UserWarning, match="PyAV"):             # no PyAV and no choice made: JPEG, said once
+                async with srv.client().avatar.connect(mode="render-audio") as call:
+                    assert call.video_format == "jpeg" and call.ready.video is None
             async with srv.client().avatar.connect(video_format="jpeg") as call:
                 pass
-            async with srv.client().avatar.connect() as call:
-                pass
-            assert srv.paths == ["/v1/avatar?mode=render-audio", "/v1/avatar?model=newera-s2s",
-                                 "/v1/avatar?model=newera-s2s"]
+            with pytest.warns(UserWarning, match="PyAV"):
+                async with srv.client().avatar.connect() as call:
+                    pass
+            assert srv.paths == ["/v1/avatar?mode=render-audio&video_format=jpeg&output=original",
+                                 "/v1/avatar?model=newera-s2s&video_format=jpeg&output=original",
+                                 "/v1/avatar?model=newera-s2s&video_format=jpeg&output=original"]
     run(go())
 
 
@@ -152,8 +155,8 @@ def test_h264_option_goes_into_the_url_and_ready_carries_the_video_dict(fake_av)
                 assert call.ready.video["codec"] == "avc1.4D401F" and call.ready.video["gop_frames"] == 50
             async with srv.client().avatar.connect(video_format="h264"):
                 pass
-            assert srv.paths == ["/v1/avatar?mode=render-audio&video_format=h264",
-                                 "/v1/avatar?model=newera-s2s&video_format=h264"]
+            assert srv.paths == ["/v1/avatar?mode=render-audio&video_format=h264&output=original",
+                                 "/v1/avatar?model=newera-s2s&video_format=h264&output=original"]
     run(go())
 
 
@@ -168,7 +171,7 @@ def test_h264_with_a_client_secret_keeps_the_option_in_the_url(fake_av):
             assert "video_format" not in ClientSecret("avs_q", 1, "newera-s2s").as_dict()
             async with client.avatar.connect(client_secret=secret):
                 pass
-            assert srv.paths == ["/v1/avatar?mode=render-audio&video_format=h264"]
+            assert srv.paths == ["/v1/avatar?mode=render-audio&video_format=h264&output=original"]
     run(go())
 
 
@@ -185,7 +188,7 @@ def test_missing_pyav_is_a_clear_error_before_any_connection(monkeypatch):
     c = Newera(api_key="k", base_url="http://127.0.0.1:1")              # nothing listens here: it must not be tried
     with pytest.raises(AvatarError) as e:
         c.avatar.connect(video_format="h264")
-    assert e.value.code == "av_not_installed" and "newera-sdk[h264]" in e.value.message
+    assert e.value.code == "av_not_installed" and "pip install av" in e.value.message
 
 
 def test_error_codes_for_video_format():
@@ -219,20 +222,20 @@ class _Http(BaseHTTPRequestHandler):
         pass
 
 
-def test_create_session_body_only_changes_for_h264():
+def test_create_session_body_carries_only_the_options_given():
     srv = HTTPServer(("127.0.0.1", 0), _Http)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         async def go():
             client = Newera(api_key="k", base_url="http://127.0.0.1:%d" % srv.server_port)
-            await client.avatar.create_session(model="newera-s2s-mini")
+            await client.avatar.create_session(model="newera-s2s-mini")             # nothing asked: nothing sent
             await client.avatar.create_session(model="newera-s2s-mini", video_format="jpeg")
             s = await client.avatar.create_session(mode="render-audio", video_format="h264")
             assert s.video_format == "h264" and s.as_dict()["video_format"] == "h264"
         run(go())
     finally:
         srv.shutdown()
-    assert _Http.seen == [{"model": "newera-s2s-mini"}, {"model": "newera-s2s-mini"},
+    assert _Http.seen == [{"model": "newera-s2s-mini"}, {"model": "newera-s2s-mini", "video_format": "jpeg"},
                           {"mode": "render-audio", "video_format": "h264"}]
 
 
