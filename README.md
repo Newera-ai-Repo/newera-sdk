@@ -122,22 +122,80 @@ Play the video with the audio as the clock: show frame `frame_index / fps` secon
 event; buffer about 2 seconds before a reply starts.
 `newera avatar` does exactly this (`newera.talk.Playback`); the docs have the same logic for browsers.
 
+### Render modes: your voice or your text, Newera's face
+
+The avatar has three modes. `conversational` is the call above and keeps working unchanged. In the two render
+modes the avatar does not listen or think: you give it **lines** and it speaks them. They are a separate product
+(request access for the render avatar), and only the face options apply (`avatar`, `image`, `idle_video`, `record`).
+
+* `mode="render-audio"`: you stream your own PCM16 mono 24 kHz audio, line by line, and the face lip-syncs it exactly.
+* `mode="render-text"`: you send the exact text of each line (up to 2000 characters); Newera voices it. Nothing is rewritten.
+
+```python
+async with client.avatar.connect(mode="render-audio") as call:
+    async with call.start_line("greeting") as line:          # your id, 1 to 64 characters; lines play in order
+        async for pcm in my_tts("Welcome!"):                  # append while it is still being synthesised
+            await line.append(pcm)
+    print(await line.wait())                                  # "completed" | "interrupted" | "failed"
+
+async with client.avatar.connect(mode="render-text") as call:
+    line = await call.speak("Welcome to the clinic.", voice="female")
+    print(await line.wait(strict=True))                       # strict: a failed line raises its typed error
+```
+
+* `call.start_line(line_id=None) -> Line` (render-audio), then `await line.append(pcm) -> bool`,
+  `await line.stream(iterable_or_async_iterator)` (appends every piece, then ends) and `await line.end()`.
+  `await call.send_line(pcm, line_id=None)` sends a whole line you already have.
+* `await call.speak(text, line_id=None, *, voice=None) -> Line` (render-text).
+* `await line.wait_started()`, `await line.wait(timeout=None, strict=False) -> status`, `line.status`, `line.error`.
+  Or callbacks for every line: `call.on_line_started(cb)` and `call.on_line_done(cb)` receive `LineStarted(line_id, at_ms)`
+  and `LineDone(line_id, status)`; the same two arrive in `call.events()`.
+* `await call.interrupt()`: stop now. Audio not yet sent is dropped here (`line.append()` returns `False`, `line.stream()`
+  stops), the server drops what is queued, you get `Interrupted`, and every open line ends `LineDone("interrupted")`.
+  Lines started afterwards play normally. It works in conversational mode too.
+
+You must read `call.events()` (even to ignore it): the video chunks queue up until you do.
+
+**Video with timestamps.** Each `VideoChunk` has `frames` (JPEG), `audio` (PCM16 24 kHz of exactly those frames),
+`audio_start_ms` / `audio_end_ms` (the audio's place on one stream clock), `line_id`, and
+`frame_times_ms()` (frame `i` is due at `audio_start_ms + i * 1000 / fps`).
+
+**A reference player.** `LipSyncPlayer` keeps lip sync with no dependencies: you give it two functions.
+
+```python
+from newera import LipSyncPlayer
+
+player = LipSyncPlayer(play_audio=speaker.write, show_frame=window.show, flush_audio=speaker.clear)
+await player.play(call.events())      # audio is the clock: frames are shown by the same clock; Interrupted flushes
+```
+
+It buffers 250 ms (`buffer_ms`), writes each chunk's audio slightly before it is due, shows frame `i` at its
+timestamp, moves the whole clock (never skipping audio) when a chunk arrives late, and drops everything on an
+interrupt. It is a reference: adapt it to your audio device's own clock for production.
+
+Browsers: `await client.avatar.create_session(mode="render-text")` checks your access, and the page opens
+`wss://api.newera.ai/v1/avatar?mode=render-text` with the same subprotocols as before.
+
+Examples: [`avatar_render_audio.py`](examples/avatar_render_audio.py), [`avatar_render_text.py`](examples/avatar_render_text.py).
+
 ### Errors
 
 A call can be refused or ended; handle these errors, all `NeweraError`s:
 
 | exception | when |
 |---|---|
-| `AvatarBusy` | the avatar can't take this call right now: tell your user and try again shortly |
+| `AvatarBusy` | the avatar can't take this call right now: try again after `.retry_after_s` seconds (may be None) |
 | `AvatarUnavailable` | the face or Newera Core is temporarily unavailable |
-| `NotEnabled` | the organisation is not enabled for the avatar or the voice model |
+| `NotEnabled` | the organisation is not enabled for this avatar product (conversational and render are separate) or the voice model |
 | `AuthenticationError` | missing or wrong key, or a used or expired client secret |
 | `InsufficientQuota` | the prepaid balance cannot cover the call |
 | `RateLimited` | too many requests, or too many calls on this key right now |
 | `InvalidRequest` | a bad session field or model (`invalid_avatar_image`: no usable face in the photo) |
 | `CallTimeLimit` | the service ended the call |
+| `WrongMode` | an event of another mode (audio line in render-text, a line in conversational) |
+| `LineError` | a refused line: bad or duplicate `line_id`, too many queued lines, line too long, bad audio or text |
 
-Each has `.code`, `.message` and `.close_code`. A refused call is never billed.
+Each has `.code`, `.message`, `.close_code` and `.retry_after_s`. A refused call is never billed.
 
 ### A browser page
 
@@ -303,6 +361,8 @@ real avatar and is skipped unless `NEWERA_API_KEY` is set (use a key enabled for
 
 ## Release notes
 
+* 0.4.0: render modes (`mode="render-audio"` and `"render-text"`) with lines, `interrupt()`, line events, video
+  timestamps (`audio_start_ms`, `audio_end_ms`, `line_id`), `LipSyncPlayer`, `retry_after_s`, new typed errors. Additive: conversational calls are unchanged.
 * 0.3.1: documentation and message wording for the avatar. No change in behaviour.
 * 0.3.0: the talking avatar (`client.avatar`, `newera avatar`).
 
