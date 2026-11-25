@@ -31,6 +31,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import warnings
 import wave
 from array import array
 from typing import Any, AsyncIterator, Callable, Iterable
@@ -43,6 +44,10 @@ DEFAULT_BASE_URL = "https://api.newera.ai"
 MODELS = ("newera-s2s", "newera-s2s-mini")
 MODES = ("conversational", "render-audio", "render-text")
 VOICES = ("male", "female")
+VIDEO_FORMATS = ("h264", "jpeg")
+OUTPUTS = ("original", "square")
+DEFAULT_VIDEO_FORMAT = "h264"
+DEFAULT_OUTPUT = "original"
 FPS = 25
 AUDIO_RATE = 24000
 CHUNK_MS = 20                       # microphone block: 20 ms, as the protocol recommends
@@ -62,7 +67,7 @@ class AvatarError(NeweraError):
 
 
 class InvalidRequest(AvatarError):
-    """4400: a bad session field or model (invalid_avatar, invalid_avatar_image, invalid_model)."""
+    """4400: a bad session field or model (invalid_avatar, invalid_avatar_image, invalid_model, invalid_video_format, invalid_output)."""
 
 
 class AuthenticationError(AvatarError):
@@ -101,7 +106,8 @@ class LineError(InvalidRequest):
 
 
 class AvatarUnavailable(AvatarError):
-    """4503 avatar_unavailable: the face or Newera Core is temporarily unavailable."""
+    """4503 avatar_unavailable: the face or Newera Core is temporarily unavailable. Also `video_format_unavailable`:
+    this gateway cannot produce H.264 right now (connect again with the default JPEG)."""
 
 
 _BY_CODE = {
@@ -114,6 +120,7 @@ _BY_CODE = {
     "avatar_busy": AvatarBusy, "avatar_unavailable": AvatarUnavailable, "model_unavailable": AvatarUnavailable,
     "avatar_concurrency_limit": RateLimited, "session_time_limit": CallTimeLimit,
     "invalid_mode": InvalidRequest, "wrong_mode": WrongMode,
+    "invalid_video_format": InvalidRequest, "invalid_output": InvalidRequest, "video_format_unavailable": AvatarUnavailable,
     "invalid_line_id": LineError, "duplicate_line": LineError, "too_many_lines": LineError,
     "line_too_long": LineError, "invalid_audio": LineError, "invalid_text": LineError, "text_too_long": LineError,
 }
@@ -152,13 +159,22 @@ class AvatarReady(AvatarEvent):
     audio_sample_rate: int = AUDIO_RATE
     frames_per_event: int = 7
     mode: str = "conversational"
+    video: dict | None = None           # h264 only: {"codec": "avc1.4D401F", "stream": "annexb", "gop_frames": 50, ...}
+    output: str = "square"              # the output the call really has: "original" (your photo's size) or "square" (512 x 512)
+    output_reason: str | None = None    # why "original" was not possible, when you asked for it and got "square"
 
 
 @dataclasses.dataclass
 class VideoChunk(AvatarEvent):
-    """`response.video.chunk`: 1 to 7 JPEG frames and the audio of exactly those frames.
+    """`response.video.chunk`: 1 to 7 frames and the audio of exactly those frames.
 
-    `frames` are JPEG bytes in display order; `audio` is PCM16 mono bytes at `sample_rate` (None for the
+    JPEG stream (the default): `frames` are JPEG bytes in display order. H.264 stream (`video_format="h264"`):
+    `frames` is empty; `units` are the Annex-B access units, one per frame in stream order, and `keyframes` the
+    indices (within this chunk) of the units that are IDR keyframes. Feed them to `newera.h264.H264Decoder` (or
+    `LipSyncPlayer`) in order and never skip one. `frame_count` is the number of frames in both forms.
+    `video_format` says which form this chunk is.
+
+    `audio` is PCM16 mono bytes at `sample_rate` (None for the
     listening face, `speech=False`, which only comes with idle_video). Show frame `frame_index` at
     `frame_index / fps` seconds on the same clock as the audio.
 
@@ -180,20 +196,31 @@ class VideoChunk(AvatarEvent):
     audio_start_ms: float = 0.0
     audio_end_ms: float = 0.0
     line_id: str | None = None
+    video_format: str = "jpeg"
+    units: list = dataclasses.field(default_factory=list, repr=False)        # h264: one access unit per frame
+    keyframes: list = dataclasses.field(default_factory=list)                # h264: indices of IDR units
+    frame_count: int = 0                                                      # 0 means: len(frames)
+
+    def __post_init__(self) -> None:
+        if not self.frame_count:
+            self.frame_count = len(self.frames) or len(self.units)
 
     def __repr__(self) -> str:
+        audio = "%d bytes" % len(self.audio) if self.audio is not None else "None"
+        if self.video_format == "h264":
+            return ("VideoChunk(frame_index=%d, start_ms=%d, h264 units=%d, keyframes=%s, audio=%s, speech=%s, "
+                    "generation_ms=%d)" % (self.frame_index, self.start_ms, len(self.units), list(self.keyframes),
+                                           audio, self.speech, self.generation_ms))
         return ("VideoChunk(frame_index=%d, start_ms=%d, frames=%d, audio=%s, speech=%s, generation_ms=%d)"
-                % (self.frame_index, self.start_ms, len(self.frames),
-                   "%d bytes" % len(self.audio) if self.audio is not None else "None", self.speech,
-                   self.generation_ms))
+                % (self.frame_index, self.start_ms, len(self.frames), audio, self.speech, self.generation_ms))
 
     @property
     def duration_ms(self) -> float:
-        return len(self.frames) * 1000.0 / self.fps
+        return (self.frame_count or len(self.frames)) * 1000.0 / self.fps
 
     def frame_times_ms(self) -> list:
         """When each frame is due, in ms on the stream clock (the clock of `audio_start_ms`)."""
-        return [self.audio_start_ms + i * 1000.0 / self.fps for i in range(len(self.frames))]
+        return [self.audio_start_ms + i * 1000.0 / self.fps for i in range(self.frame_count or len(self.frames))]
 
 
 @dataclasses.dataclass
@@ -303,6 +330,11 @@ def parse_event(data: dict) -> AvatarEvent:
     t = data.get("type", "")
     if t == "response.video.chunk":
         audio = data.get("audio")
+        fmt = data.get("video_format") or "jpeg"
+        units: list = []
+        if fmt == "h264":
+            units = _split_units(base64.b64decode(data.get("video") or ""), data.get("frame_sizes") or [])
+        count = int(data.get("frame_count") or 0) or len(data.get("frames") or []) or len(units)
         return VideoChunk(
             raw={"type": t, "event_id": data.get("event_id")},
             frame_index=int(data.get("frame_index", 0)), start_ms=int(data.get("start_ms", 0)),
@@ -313,14 +345,17 @@ def parse_event(data: dict) -> AvatarEvent:
             queued_ms=int(data.get("queued_ms") or 0), index=int(data.get("index") or 0),
             audio_start_ms=_ms(data, "audio_start_ms", data.get("start_ms")),
             audio_end_ms=_ms(data, "audio_end_ms", None) or (
-                _ms(data, "audio_start_ms", data.get("start_ms")) + len(data.get("frames") or []) * 1000.0 / int(data.get("fps") or FPS)),
-            line_id=data.get("line_id"))
+                _ms(data, "audio_start_ms", data.get("start_ms")) + count * 1000.0 / int(data.get("fps") or FPS)),
+            line_id=data.get("line_id"), video_format=fmt, units=units,
+            keyframes=[int(k) for k in data.get("keyframes") or []], frame_count=count)
     if t == "avatar.ready":
         return AvatarReady(raw=data, fps=int(data.get("fps") or FPS), width=int(data.get("width") or 512),
                            height=int(data.get("height") or 512), video_format=data.get("video_format", "jpeg"),
                            audio_sample_rate=int(data.get("audio_sample_rate") or AUDIO_RATE),
                            frames_per_event=int(data.get("frames_per_event") or 7),
-                           mode=data.get("mode") or "conversational")
+                           output=data.get("output") or "square", output_reason=data.get("output_reason"),
+                           mode=data.get("mode") or "conversational",
+                           video=data.get("video") if isinstance(data.get("video"), dict) else None)
     if t == "avatar.interrupted":
         return Interrupted(raw=data)
     if t == "avatar.unavailable":
@@ -358,6 +393,18 @@ def parse_event(data: dict) -> AvatarEvent:
     return OtherEvent(raw=data)
 
 
+def _split_units(video: bytes, sizes: list) -> list:
+    """The access units of an h264 event: `video` cut at the byte lengths in `sizes`."""
+    sizes = [int(n) for n in sizes]
+    if sum(sizes) != len(video) or any(n < 0 for n in sizes):
+        raise ValueError("h264 video chunk: frame_sizes add up to %d bytes but the video has %d" % (sum(sizes), len(video)))
+    units, pos = [], 0
+    for n in sizes:
+        units.append(video[pos:pos + n])
+        pos += n
+    return units
+
+
 def _ms(data: dict, key: str, default) -> float:
     v = data.get(key)
     v = default if v is None else v
@@ -382,26 +429,44 @@ class Timeline:
         self.fps, self.sample_rate = fps, sample_rate
         self.jpegs: dict[int, bytes] = {}
         self.pcm: dict[int, bytes] = {}
+        self.units: dict[int, bytes] = {}           # h264 stream: the access unit of each frame, as received
+        self.keyframes: set[int] = set()            # h264 stream: the frame numbers of the IDR units
+
+    @property
+    def is_h264(self) -> bool:
+        return bool(self.units)
 
     def add(self, chunk: VideoChunk) -> None:
         self.fps, self.sample_rate = chunk.fps, chunk.sample_rate
-        n = len(chunk.frames)
+        n = chunk.frame_count or len(chunk.frames)
         per = (len(chunk.audio) // n) // 2 * 2 if chunk.audio and n else 0       # bytes of audio per frame
-        for i, jpeg in enumerate(chunk.frames):
-            self.jpegs[chunk.frame_index + i] = jpeg
+        if chunk.video_format == "h264":
+            for i, unit in enumerate(chunk.units):
+                self.units[chunk.frame_index + i] = unit
+                if i in chunk.keyframes:
+                    self.keyframes.add(chunk.frame_index + i)
+        else:
+            for i, jpeg in enumerate(chunk.frames):
+                self.jpegs[chunk.frame_index + i] = jpeg
+        for i in range(n):
             if per:
                 self.pcm[chunk.frame_index + i] = chunk.audio[i * per:(i + 1) * per]
 
     def __len__(self) -> int:
-        return len(self.jpegs)
+        return len(self.units) if self.units else len(self.jpegs)
 
     @property
     def seconds(self) -> float:
+        if self.is_h264:
+            return len(self._h264_layout()[0]) / self.fps
         return len(self.timeline()[0]) / self.fps
 
     def timeline(self, max_gap_s: float = 1.0) -> tuple[list[bytes], bytes]:
         """(JPEG frames, PCM16 audio) from the first to the last frame. A gap between replies repeats the
-        last frame in silence, at most `max_gap_s` seconds of it."""
+        last frame in silence, at most `max_gap_s` seconds of it. For an h264 call the frames are decoded
+        (needs PyAV) and, unlike the MP4, the gap frames are repeated like for JPEG."""
+        if self.is_h264:
+            return self._h264_timeline(max_gap_s)
         if not self.jpegs:
             return [], b""
         silent = bytes(self.sample_rate // self.fps * 2)
@@ -419,9 +484,78 @@ class Timeline:
             prev = n
         return frames, bytes(pcm)
 
+    # ---- h264 streams: the received access units are kept as they are
+
+    def _h264_layout(self, max_gap_s: float = 1.0) -> tuple[list[tuple[int, int]], bytes]:
+        """([(frame number, slot)], PCM16 audio) of the playable part of an h264 stream: it starts at the first
+        keyframe (leading units cannot be decoded). A slot is the frame's position on the output clock; a gap
+        between frames shrinks to at most `max_gap_s` seconds and is silent. No frame is repeated."""
+        order = sorted(self.units)
+        first = next((n for n in order if n in self.keyframes), None)
+        if first is None:
+            return [], b""
+        silent = bytes(self.sample_rate // self.fps * 2)
+        max_gap = int(max_gap_s * self.fps)
+        layout: list[tuple[int, int]] = []
+        pcm = bytearray()
+        prev, slot = None, 0
+        for n in order:
+            if n < first:
+                continue
+            if prev is not None:
+                step = min(n - prev, max_gap + 1)
+                pcm += silent * (step - 1)
+                slot += step
+            layout.append((n, slot))
+            pcm += self.pcm.get(n, silent)
+            prev = n
+        return layout, bytes(pcm)
+
+    def _h264_timeline(self, max_gap_s: float = 1.0) -> tuple[list[bytes], bytes]:
+        layout, pcm = self._h264_layout(max_gap_s)
+        return self._decode_jpegs([n for n, _ in layout]), pcm
+
+    def _decode_jpegs(self, numbers: list[int]) -> list[bytes]:
+        """The JPEG of every decodable frame among `numbers` (frame numbers of `units`), in order."""
+        from .h264 import H264Decoder
+        dec = H264Decoder()
+        out: list[bytes] = []
+        try:
+            for n in numbers:
+                out += [f.to_jpeg() for f in dec.decode_units([self.units[n]], [0] if n in self.keyframes else [], n)]
+            out += [f.to_jpeg() for f in dec.flush()]
+        finally:
+            dec.close()
+        return out
+
+    def save_h264(self, path: str | os.PathLike) -> str:
+        """The video of an h264 call as a raw Annex-B file (`.h264`), exactly the access units that were received,
+        from the first keyframe on. Play it with `ffplay -f h264 file.h264`."""
+        if not self.is_h264:
+            raise RuntimeError("This call has no h264 video. Open it with connect(..., video_format=\"h264\").")
+        layout, _ = self._h264_layout()
+        if not layout:
+            raise RuntimeError("No keyframe was received, so there is nothing to save.")
+        with open(os.fspath(path), "wb") as fh:
+            for n, _ in layout:
+                fh.write(self.units[n])
+        return os.fspath(path)
+
+    def _save_mp4_h264(self, path: str | os.PathLike) -> str:
+        """MP4 of an h264 call without re-encoding the video: the received access units are muxed as they are, with
+        timestamps from their frame numbers (frames that never came leave a gap; none is repeated), and only the
+        audio is encoded (PCM to AAC). Needs PyAV."""
+        from .h264 import mux_mp4
+        layout, pcm = self._h264_layout()
+        if not layout:
+            raise RuntimeError("No keyframe was received, so there is nothing to save.")
+        mux_mp4([(self.units[n], n in self.keyframes, slot) for n, slot in layout], pcm, self.fps, self.sample_rate,
+                os.fspath(path))
+        return os.fspath(path)
+
     def save_wav(self, path: str | os.PathLike) -> str:
         """The audio of the call as a PCM16 mono WAV."""
-        _, pcm = self.timeline()
+        pcm = self._h264_layout()[1] if self.is_h264 else self.timeline()[1]
         with wave.open(os.fspath(path), "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
@@ -430,7 +564,7 @@ class Timeline:
         return os.fspath(path)
 
     def save_frames(self, directory: str | os.PathLike) -> str:
-        """The frames as 000000.jpg, 000001.jpg, ... in `directory`."""
+        """The frames as 000000.jpg, 000001.jpg, ... in `directory`. An h264 call is decoded to JPEG (needs PyAV)."""
         frames, _ = self.timeline()
         os.makedirs(directory, exist_ok=True)
         for i, jpeg in enumerate(frames):
@@ -440,7 +574,10 @@ class Timeline:
 
     def save_mp4(self, path: str | os.PathLike) -> str:
         """Frames and audio muxed into an MP4 (H.264 and AAC). Needs `ffmpeg` on the PATH; without it,
-        use `save_frames()` and `save_wav()`."""
+        use `save_frames()` and `save_wav()`. An h264 call is muxed without re-encoding the video and needs PyAV
+        instead of ffmpeg (see `_save_mp4_h264`)."""
+        if self.is_h264:
+            return self._save_mp4_h264(path)
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             raise RuntimeError("ffmpeg was not found on the PATH. Install it (macOS: brew install ffmpeg), or use "
@@ -474,6 +611,11 @@ class AvatarReply:
     def frames(self) -> list:
         """All the reply's JPEG frames, in order."""
         return [f for c in self.chunks if c.speech for f in c.frames]
+
+    @property
+    def units(self) -> list:
+        """All the reply's h264 access units, in order (empty for a JPEG call)."""
+        return [u for c in self.chunks if c.speech for u in c.units]
 
     @property
     def audio(self) -> bytes:
@@ -529,11 +671,17 @@ class ClientSecret:
     expires_at: int
     model: str
     mode: str = "conversational"
+    video_format: str | None = None     # what the secret was made for; None = the server's default (h264)
+    output: str | None = None           # likewise: None = the server's default (original)
 
     def as_dict(self) -> dict:
         d = {"client_secret": {"value": self.value, "expires_at": self.expires_at}, "model": self.model}
         if self.mode != "conversational":
             d["mode"] = self.mode
+        if self.video_format:
+            d["video_format"] = self.video_format
+        if self.output:
+            d["output"] = self.output
         return d
 
 
@@ -559,29 +707,42 @@ class Avatar:
         data = await asyncio.to_thread(self._client._http, "GET", "/v1/avatar/availability")
         return Availability(busy=bool(data.get("busy")), available=bool(data.get("available", True)))
 
-    async def create_session(self, model: str = "newera-s2s", *, mode: str = "conversational") -> ClientSecret:
+    async def create_session(self, model: str = "newera-s2s", *, mode: str = "conversational",
+                             video_format: str | None = None, output: str | None = None) -> ClientSecret:
         """Trade the API key for a client secret (`avs_...`, one use, 60 seconds) that a browser opens the
         WebSocket with; call it from your server, never from a page. `mode` is checked against your
-        entitlements now (the page still opens the socket with `?mode=` itself). `model` is for conversational."""
+        entitlements now (the page still opens the socket with `?mode=` itself). `model` is for conversational.
+        `video_format` ("h264" or "jpeg") and `output` ("original" or "square") are checked now and kept in the
+        secret as the socket's defaults (the page may still pass `&video_format=` / `&output=` itself); left out,
+        the server's defaults apply (h264, original)."""
         _check_mode(mode)
+        if video_format is not None:
+            _check_video_format(video_format)
+        if output is not None:
+            _check_output(output)
         body: dict = {}
         if mode == "conversational":
             _check_model(model)
             body["model"] = model
         else:
             body["mode"] = mode
+        if video_format is not None:
+            body["video_format"] = video_format
+        if output is not None:
+            body["output"] = output
         data = await asyncio.to_thread(self._client._http, "POST", "/v1/avatar/sessions", body)
         secret = data.get("client_secret") or {}
         if not secret.get("value"):
             raise AvatarError("invalid_response", "The server did not return a client secret.")
         return ClientSecret(value=secret["value"], expires_at=int(secret.get("expires_at") or 0),
-                            model=data.get("model") or model, mode=data.get("mode") or mode)
+                            model=data.get("model") or model, mode=data.get("mode") or mode,
+                            video_format=video_format, output=output)
 
     def connect(self, avatar: str = "lama", *, voice: str = "female", language: str | None = None,
                 model: str = "newera-s2s", image: Any = None, face_crop: bool = True, idle_video: bool = False,
                 instructions: str | None = None, input_sample_rate: int = AUDIO_RATE, record: bool = False,
                 client_secret: str | ClientSecret | None = None, mode: str | None = None,
-                **realtime_settings) -> "_Connect":
+                video_format: str | None = None, output: str | None = None, **realtime_settings) -> "_Connect":
         """Open a call: `async with client.avatar.connect(...) as call:`.
 
         mode           "conversational" (default: the avatar listens and answers), "render-audio" (you stream
@@ -600,18 +761,42 @@ class Avatar:
         idle_video     also stream the face while it listens (about ten times the data).
         record         keep every frame and its audio so `call.save_mp4()` works (about 1 MB per second of video).
         client_secret  connect with a secret from `create_session()` instead of the API key.
+        video_format   "h264" (default: H.264 access units, under 1 Mbit/s; decoded with PyAV, which the SDK installs;
+                       `newera.h264.H264Decoder` or `LipSyncPlayer` do it for you) or "jpeg" (JPEG frames, several
+                       times the data; no decoder needed).
+        output         "original" (default) or "square". "original": the video has the size and framing of the photo
+                       you pass as `image` (longest side at most 1280 px), the face animated in place and nothing
+                       else moving. "square": the 512 x 512 face only. Without an `image` (a preset face), or when
+                       the face cannot be placed in the photo, the call is served "square": see
+                       `call.ready.output` and `call.ready.output_reason`.
         realtime_settings  anything else of the realtime `session.update` (turn_detection, tools, ...).
         """
         _check_model(model)
+        if video_format is not None:
+            _check_video_format(video_format)
+        if output is not None:
+            _check_output(output)
         if voice is not None and voice not in VOICES:
             raise ValueError("voice must be one of %s, not %r" % (", ".join(VOICES), voice))
         if language not in (None, "auto", "ar", "en"):
             raise ValueError('language must be "ar", "en" or None (detect), not %r' % (language,))
         if isinstance(client_secret, ClientSecret):
             mode = mode or client_secret.mode
+            video_format = video_format or client_secret.video_format
+            output = output or client_secret.output
             model, client_secret = client_secret.model, client_secret.value
         mode = mode or "conversational"
         _check_mode(mode)
+        output = output or DEFAULT_OUTPUT
+        if video_format is None:
+            video_format = DEFAULT_VIDEO_FORMAT
+            if not _has_av():                # PyAV is a dependency; a stripped-down install still gets video
+                warnings.warn("PyAV (av) is not installed, so the call uses video_format=\"jpeg\"; "
+                              "pip install av for H.264.", stacklevel=2)
+                video_format = "jpeg"
+        if video_format == "h264":
+            from .h264 import require_av
+            require_av()                    # before any connection: a missing PyAV must not surface mid-call
         if mode == "conversational":
             session = build_session(avatar=avatar, voice=voice, language=language, image=image, face_crop=face_crop,
                                     idle_video=idle_video, instructions=instructions,
@@ -621,7 +806,25 @@ class Avatar:
                 raise ValueError("language, instructions, model, input_sample_rate and realtime settings are for "
                                  "conversational mode; the render modes take only the face options.")
             session = build_session(avatar=avatar, voice=None, image=image, face_crop=face_crop, idle_video=idle_video)
-        return _Connect(self._client, session, model, record, client_secret, mode)
+        return _Connect(self._client, session, model, record, client_secret, mode, video_format, output)
+
+
+def _has_av() -> bool:
+    try:
+        import av  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _check_output(output: str) -> None:
+    if output not in OUTPUTS:
+        raise ValueError("output must be one of %s, not %r" % (", ".join(OUTPUTS), output))
+
+
+def _check_video_format(video_format: str) -> None:
+    if video_format not in VIDEO_FORMATS:
+        raise ValueError("video_format must be one of %s, not %r" % (", ".join(VIDEO_FORMATS), video_format))
 
 
 def _check_mode(mode: str) -> None:
@@ -672,9 +875,11 @@ def _image_b64(image: Any) -> str:
 
 class _Connect:
     def __init__(self, client, session: dict, model: str, record: bool, secret: str | None,
-                 mode: str = "conversational"):
+                 mode: str = "conversational", video_format: str = DEFAULT_VIDEO_FORMAT, output: str = DEFAULT_OUTPUT):
         self.client, self.session, self.model, self.record, self.secret = client, session, model, record, secret
         self.mode = mode
+        self.video_format = video_format
+        self.output = output
         self.call: AvatarCall | None = None
 
     def __await__(self):
@@ -692,6 +897,8 @@ class _Connect:
                 query["model"] = self.model
         if self.mode != "conversational":
             query["mode"] = self.mode          # the secret does not carry the mode: it is always in the URL
+        query["video_format"] = self.video_format      # always said, so a server's own defaults cannot surprise the call
+        query["output"] = self.output
         if query:
             url += "?" + urllib.parse.urlencode(query)
         ctx = self.client._ssl_context()
@@ -702,7 +909,7 @@ class _Connect:
         except websockets.InvalidStatus as exc:
             raise error_for(None, "The server refused the connection (HTTP %s)." % exc.response.status_code,
                             http_status=exc.response.status_code) from exc
-        self.call = AvatarCall(ws, self.session, record=self.record, mode=self.mode)
+        self.call = AvatarCall(ws, self.session, record=self.record, mode=self.mode, video_format=self.video_format)
         try:
             await self.call._start()
         except BaseException:
@@ -824,9 +1031,11 @@ class Line:
 class AvatarCall:
     """An open call. Send audio in, iterate `events()` out; `close()` ends it (or leave the `async with`)."""
 
-    def __init__(self, ws, session: dict, *, record: bool = False, mode: str = "conversational"):
+    def __init__(self, ws, session: dict, *, record: bool = False, mode: str = "conversational",
+                 video_format: str = "jpeg"):
         self._ws = ws
         self.mode = mode
+        self.video_format = video_format              # what the server answers in avatar.ready, once started
         self.lines: dict[str, Line] = {}              # the lines you started (render modes), by id
         self.last_error: AvatarError | None = None    # the last `error` event, as its exception
         self._line_callbacks: dict[str, list] = {"started": [], "done": []}
@@ -863,6 +1072,7 @@ class AvatarCall:
                 ev = parse_event(json.loads(raw))
                 if isinstance(ev, AvatarReady):
                     self.ready = ev
+                    self.video_format = ev.video_format
                 elif isinstance(ev, ErrorEvent):
                     await self._wait_close()
                     raise ev.exception(self.close_code)
@@ -1081,6 +1291,13 @@ class AvatarCall:
         await self._line_event(line, "avatar.line.text", **fields)
         return line
 
+    async def request_keyframe(self) -> None:
+        """h264 only: ask for a keyframe (`avatar.video.keyframe`), for when your decoder lost its picture. The
+        server answers with an IDR unit (SPS and PPS in front) in the next video event. Harmless (sends nothing)
+        on a JPEG call. `LipSyncPlayer(request_keyframe=call.request_keyframe)` calls it for you."""
+        if self.video_format == "h264" and not self._closed:
+            await self._send({"type": "avatar.video.keyframe"})
+
     async def interrupt(self) -> None:
         """Stop now: queued audio is dropped, nothing rendered from it plays, and every open line ends with
         `LineDone(status="interrupted")` (and an `Interrupted` event). Audio you had not sent yet is dropped
@@ -1129,6 +1346,13 @@ class AvatarCall:
             if isinstance(ev, VideoChunk) and ev.speech:
                 for i, jpeg in enumerate(ev.frames):
                     yield ev.frame_index + i, jpeg
+
+    async def units(self) -> AsyncIterator[tuple[int, bytes, bool]]:
+        """h264 calls: (frame_index, access unit, is_keyframe) of every reply frame, in order, as they arrive."""
+        async for ev in self.events():
+            if isinstance(ev, VideoChunk) and ev.speech and ev.video_format == "h264":
+                for i, unit in enumerate(ev.units):
+                    yield ev.frame_index + i, unit, i in ev.keyframes
 
     async def audio(self) -> AsyncIterator[bytes]:
         """The reply audio (PCM16 mono 24 kHz) in order, as it arrives."""
@@ -1193,13 +1417,18 @@ class AvatarCall:
         return self.timeline
 
     def save_mp4(self, path: str | os.PathLike) -> str:
-        """The recorded video and audio as an MP4 (needs ffmpeg; needs `record=True`)."""
+        """The recorded video and audio as an MP4 (needs `record=True`). A JPEG call is encoded with ffmpeg. An h264
+        call is muxed without re-encoding the video and needs PyAV (the audio is encoded to AAC)."""
         return self._recorded().save_mp4(path)
+
+    def save_h264(self, path: str | os.PathLike) -> str:
+        """An h264 call's video as the raw Annex-B stream that was received (needs `record=True`)."""
+        return self._recorded().save_h264(path)
 
     def save_wav(self, path: str | os.PathLike) -> str:
         """The recorded reply audio as a WAV (needs `record=True`)."""
         return self._recorded().save_wav(path)
 
     def save_frames(self, directory: str | os.PathLike) -> str:
-        """The recorded frames as numbered JPEGs (needs `record=True`)."""
+        """The recorded frames as numbered JPEGs (needs `record=True`; an h264 call is decoded, needs PyAV)."""
         return self._recorded().save_frames(directory)

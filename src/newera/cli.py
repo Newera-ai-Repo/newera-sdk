@@ -2,6 +2,8 @@
 
     newera avatar                      # talk to the avatar: microphone, speaker and a window
     newera avatar --input-file q.wav   # replay a WAV as the caller (no microphone), end after the reply
+    newera avatar --image me.jpg       # your own face: the video keeps your photo's size and framing
+    newera avatar --square --jpeg      # the old output: a 512 x 512 face, JPEG frames
 """
 
 from __future__ import annotations
@@ -29,6 +31,8 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--idle-video", action="store_true", help="also show the face while it listens (blinking, small movements)")
     a.add_argument("--input-file", metavar="WAV", help="replay this WAV file as the caller instead of the microphone, "
                                                        "and end the call after the reply")
+    a.add_argument("--jpeg", action="store_true", help="JPEG video frames instead of H.264 (several times the data)")
+    a.add_argument("--square", action="store_true", help="only the 512 x 512 face, not your photo's size and framing")
     a.add_argument("--no-window", action="store_true", help="no window (transcript and sound only)")
     a.add_argument("--mute", action="store_true", help="do not play the avatar's voice")
     a.add_argument("--prebuffer", type=float, default=2.0, metavar="SECONDS",
@@ -53,7 +57,8 @@ def main(argv: list[str] | None = None) -> int:
     return talk(api_key=args.api_key, avatar=args.avatar, image=args.image, voice=args.voice, language=args.language,
                 model=args.model, instructions=args.instructions, idle_video=args.idle_video, input_file=args.input_file,
                 window=not args.no_window, mute=args.mute, prebuffer=args.prebuffer, record=args.record,
-                input_device=device, screenshot_dir=args.screenshot_dir, max_seconds=args.max_seconds)
+                input_device=device, screenshot_dir=args.screenshot_dir, max_seconds=args.max_seconds,
+                video_format="jpeg" if args.jpeg else None, output="square" if args.square else None)
 
 
 if __name__ == "__main__":

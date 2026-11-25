@@ -21,6 +21,14 @@ from newera.talk import Playback
 FRAME_BYTES = AUDIO_RATE // 25 * 2     # 1920 bytes of audio per frame
 
 
+def bare(path):
+    """A request path without the video_format and output options (every call sends them, see test_avatar_output.py)."""
+    from urllib.parse import parse_qsl, urlencode, urlsplit
+    u = urlsplit(path)
+    q = [(k, v) for k, v in parse_qsl(u.query) if k not in ("video_format", "output")]
+    return u.path + ("?" + urlencode(q) if q else "")
+
+
 def b64(b: bytes) -> str:
     return base64.b64encode(b).decode()
 
@@ -181,7 +189,7 @@ def test_call_sends_session_update_first_and_gets_typed_events():
         async with FakeAvatar() as srv:
             async with client_for(srv).avatar.connect("lama", voice="male", language="en", model="newera-s2s-mini",
                                                        record=True, instructions="be brief") as call:
-                assert srv.paths[0] == "/v1/avatar?model=newera-s2s-mini"
+                assert bare(srv.paths[0]) == "/v1/avatar?model=newera-s2s-mini"
                 assert srv.headers[0]["authorization"] == "Bearer nwc_test"
                 assert call.ready.frames_per_event == 7 and call.session["id"] == "sess_1"
                 await call.send_text("hello")
@@ -349,7 +357,7 @@ def test_connect_with_client_secret_sends_subprotocol_and_no_key(monkeypatch):
                 pass
             assert srv.protocols[0] == "realtime, newera-client-secret.avs_xyz"
             assert "authorization" not in srv.headers[0]
-            assert srv.paths[0] == "/v1/avatar"                       # the model was fixed when the secret was made
+            assert bare(srv.paths[0]) == "/v1/avatar"                       # the model was fixed when the secret was made
     run(go())
 
 
