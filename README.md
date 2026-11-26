@@ -331,9 +331,10 @@ call.on_line_piece(lambda p: print("%5d-%5d ms  %s" % (p.start_ms, p.end_ms, p.t
 ```
 
 * Word timings: shortly after each piece, while it plays, `LineWords(line_id, piece_index, words, approximate)` arrives in
-  `call.events()`, in `call.on_line_words(callback)` and in `line.words`. `words` is a list of `Word(word, start_ms, end_ms)`
+  `call.events()`, in `call.on_line_words(callback)` and in `line.words`. `words` is a list of `Word(word, start_ms, end_ms, approximate)`
   on the same line clock as the pieces, so a caption can highlight each word as the clock reaches it. `approximate=True`
-  means the times are spread evenly over the piece instead of measured; the event is always sent. `word` is what you wrote
+  means at least one word's time was estimated instead of measured; `Word.approximate` says which (all of them when
+  nothing could be measured, an even spread over the piece); the event is always sent. `word` is what you wrote
   when the spoken form has the same number of words; a number read as several words (`25` -> `twenty five`) comes as the
   spoken words. `connect(..., word_timings=False)` turns the event off.
 
@@ -653,6 +654,7 @@ real avatar and is skipped unless `NEWERA_API_KEY` is set (use a key enabled for
 
 Full list: [CHANGELOG.md](CHANGELOG.md).
 
+* 0.10.1: `Word.approximate` (per-word flag; default False). Additive.
 * 0.10.0: word timings in render-text: `LineWords`, `Word`, `call.on_line_words`, `line.words`, `connect(word_timings=False)`. Additive.
 * 0.9.0: speech to text: `client.audio.transcribe(...)` for files and `client.audio.transcribe_stream(...)` for live audio
   (`Segment`, `Done`, `stt.SpeechStarted`, `stt.SpeechStopped`). Additive.

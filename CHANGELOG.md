@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.1
+
+Per-word `approximate`. Additive and backward compatible: older servers do not send the field and it reads False.
+
+Added
+* `Word.approximate` (default `False`): True when that word's time was estimated between the measured words around it,
+  not measured. `LineWords.approximate` is now True when at least one word was estimated (all of them when nothing could
+  be measured). Needs the Newera Core release that sends the per-word field.
+
 ## 0.10.0
 
 Word timings in render-text. Additive: nothing changes for existing code except that the new event arrives (an event type

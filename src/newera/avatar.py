@@ -369,17 +369,21 @@ class LinePiece(AvatarEvent):
 
 @dataclasses.dataclass
 class Word:
-    """One timed word of a piece: `start_ms` and `end_ms` on the line's own clock (the clock of `LinePiece`)."""
+    """One timed word of a piece: `start_ms` and `end_ms` on the line's own clock (the clock of `LinePiece`).
+    `approximate` is True when this word's time was estimated (spread between the measured words around it) instead of
+    measured; False when measured or when the server does not say."""
     word: str = ""
     start_ms: float = 0.0
     end_ms: float = 0.0
+    approximate: bool = False
 
 
 @dataclasses.dataclass
 class LineWords(AvatarEvent):
     """`avatar.line.words` (render-text): the words of piece `piece_index` of a line, each with its start and end on the
     line's own clock. Sent shortly after the piece's `LinePiece`, while the piece plays, in piece order. `approximate`
-    is True when the times are an even spread over the piece (not measured): use them for a karaoke-style highlight,
+    is True when at least one word's time was estimated (see `Word.approximate`; all of them when nothing could be
+    measured): use them for a karaoke-style highlight,
     not for frame-exact work. `word` is the word you sent when the spoken form has the same number of words
     (a number read as one word stays as you wrote it), otherwise the spoken words (`25` -> `twenty five`)."""
     line_id: str = ""
@@ -513,7 +517,8 @@ def parse_event(data: dict) -> AvatarEvent:
                          text=data.get("text") or "", start_ms=_ms(data, "start_ms", 0), end_ms=_ms(data, "end_ms", 0))
     if t == "avatar.line.words":
         return LineWords(raw=data, line_id=data.get("line_id") or "", piece_index=int(data.get("piece_index") or 0),
-                         words=[Word(word=w.get("word") or "", start_ms=_ms(w, "start_ms", 0), end_ms=_ms(w, "end_ms", 0))
+                         words=[Word(word=w.get("word") or "", start_ms=_ms(w, "start_ms", 0), end_ms=_ms(w, "end_ms", 0),
+                                      approximate=bool(w.get("approximate")))
                                 for w in (data.get("words") or []) if isinstance(w, dict)],
                          approximate=bool(data.get("approximate")))
     if t == "avatar.line.done":
@@ -1688,7 +1693,7 @@ class AvatarCall:
 
     def on_line_words(self, callback: Callable[[LineWords], Any]) -> Callable:
         """Call `callback(LineWords)` (a function or a coroutine function) with the timed words of each piece of a
-        render-text line (`ev.words`: `Word(word, start_ms, end_ms)`, `ev.approximate`). They arrive after the piece's
+        render-text line (`ev.words`: `Word(word, start_ms, end_ms, approximate)`, `ev.approximate`). They arrive after the piece's
         `LinePiece`, while it plays. The same events come out of `events()` and fill `line.words`. Turn them off with
         `connect(word_timings=False)`."""
         self._line_callbacks["words"].append(callback)
