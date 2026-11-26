@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.8.0
+
+Streamed text lines, per-line voice options, piece timing and streaming speech. Additive: nothing changes for existing
+code. Needs the Newera Core release that has `avatar.line.text.delta`, `avatar.line.piece` and `stream` on
+`/v1/audio/speech`.
+
+Added
+* render-text: `call.start_text_line(line_id=None, *, voice, quality, normalize, pronunciations) -> Line` with
+  `await line.append_text(text)` / `await line.stream_text(iterable_or_async_iterator)` / `await line.end()`, and
+  `await call.stream_text(chunks, line_id=None, **options)` for a whole line from a stream. The avatar starts speaking
+  after the first clause, while the rest of the text is still arriving. Events `avatar.line.text.delta` and
+  `avatar.line.text.end`.
+* `speak(...)` and the streamed lines take `quality` ("instant", "balanced", "studio"), `normalize` (default on: numbers,
+  times and amounts are read as words in the language of each sentence) and `pronunciations={"word": "respelling"}`.
+  `connect(..., quality=, normalize=, pronunciations=)` sets the defaults of every line (render-text only; sent as
+  `voice_quality`, `normalize`, `pronunciations` of the session).
+* `<break time="500ms"/>` in the text is a pause of exactly that length.
+* `LinePiece(line_id, index, text, start_ms, end_ms)` (`avatar.line.piece`): a piece of a line was voiced, with its times on
+  the line's own clock. In `call.events()`, `call.on_line_piece(callback)` and `line.pieces`.
+* `client.audio.speech(input, *, model="newera-tts", voice, quality, normalize, pronunciations, response_format, speed,
+  language, stream=False)`: the audio as bytes, or with `stream=True` an async iterator of audio chunks that arrive as they
+  are voiced (`pcm` raw, `wav` with an open-length streaming header). Stopping the iteration closes the connection.
+  `AvatarError("stream_interrupted")` when a stream is cut after its first chunk.
+* New error classes by code: `unknown_line`, `line_closed`, `invalid_quality`, `invalid_pronunciations` are `LineError`.
+* README sections "Text that streams in, line options and following the speech" and "Text to speech"; examples
+  `avatar_stream_text.py` and `speech_stream.py`.
+
 ## 0.7.0
 
 Join your own LiveKit room. Additive, nothing changes for existing code. Needs the server side that accepts

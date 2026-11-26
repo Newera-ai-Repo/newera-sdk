@@ -6,11 +6,12 @@
 from .agent import DEFAULT_URL, Call, Event, NeweraError, Reply, ToolSpec, VoiceAgent
 from .avatar import (AudioDelta, Availability, AvatarBusy, AvatarCall, AvatarError, AvatarEvent, AvatarReady,
                      AvatarReply, AvatarUnavailable, AuthenticationError, CallTimeLimit, ClientSecret, ErrorEvent,
-                     InsufficientQuota, Interrupted, InvalidRequest, Line, LineDone, LineError, LineStarted, NotEnabled, OtherEvent, RateLimited,
+                     InsufficientQuota, Interrupted, InvalidRequest, Line, LineDone, LineError, LinePiece, LineStarted, NotEnabled, OtherEvent, RateLimited,
                      ReplyText, ReplyTextDelta, ResponseDone, SessionSummary, SpeechStarted, SpeechStopped,
                      Timeline, TransportUnavailable, Unavailable, UserTranscript, VideoChunk, WrongMode, WrongTransport,
                      LiveKitRoom, LiveKitJoin, LiveKitDisconnected, ByoRefused, DEFAULT_TRANSPORT, TRANSPORTS)
 from .client import Newera
+from .speech import Audio
 from .h264 import DecodedFrame, H264Decoder
 from .player import LipSyncPlayer
 from .schema import function_schema, type_schema
@@ -25,11 +26,11 @@ def talk(**kwargs) -> int:
 
 __all__ = ["VoiceAgent", "Call", "Event", "Reply", "ToolSpec", "NeweraError", "DEFAULT_URL",
            "function_schema", "type_schema",
-           "Newera", "talk", "AvatarCall", "AvatarReply", "Availability", "ClientSecret", "Timeline",
+           "Newera", "Audio", "talk", "AvatarCall", "AvatarReply", "Availability", "ClientSecret", "Timeline",
            "AvatarEvent", "AvatarReady", "VideoChunk", "Interrupted", "Unavailable", "AudioDelta", "UserTranscript",
            "ReplyTextDelta", "ReplyText", "SpeechStarted", "SpeechStopped", "ResponseDone", "SessionSummary",
            "ErrorEvent", "OtherEvent",
            "AvatarError", "InvalidRequest", "AuthenticationError", "InsufficientQuota", "NotEnabled",
            "CallTimeLimit", "RateLimited", "AvatarBusy", "AvatarUnavailable",
-           "WrongMode", "WrongTransport", "TransportUnavailable", "LiveKitRoom", "LiveKitJoin", "LiveKitDisconnected", "ByoRefused", "DEFAULT_TRANSPORT", "TRANSPORTS", "LineError", "Line", "LineStarted", "LineDone", "LipSyncPlayer", "H264Decoder", "DecodedFrame"]
-__version__ = "0.7.0"
+           "WrongMode", "WrongTransport", "TransportUnavailable", "LiveKitRoom", "LiveKitJoin", "LiveKitDisconnected", "ByoRefused", "DEFAULT_TRANSPORT", "TRANSPORTS", "LineError", "Line", "LineStarted", "LineDone", "LinePiece", "LipSyncPlayer", "H264Decoder", "DecodedFrame"]
+__version__ = "0.8.0"

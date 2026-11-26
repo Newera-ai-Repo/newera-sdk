@@ -49,6 +49,7 @@ DEFAULT_BASE_URL = "https://api.newera.ai"
 MODELS = ("newera-s2s", "newera-s2s-mini")
 MODES = ("conversational", "render-audio", "render-text")
 VOICES = ("male", "female")
+QUALITIES = ("instant", "balanced", "studio")      # the voice's speed/quality tiers (render-text lines and newera-tts)
 VIDEO_FORMATS = ("h264", "jpeg")
 OUTPUTS = ("original", "square")
 TRANSPORTS = ("livekit", "websocket")
@@ -151,6 +152,7 @@ _BY_CODE = {
     "invalid_video_format": InvalidRequest, "invalid_output": InvalidRequest, "video_format_unavailable": AvatarUnavailable,
     "invalid_line_id": LineError, "duplicate_line": LineError, "too_many_lines": LineError,
     "line_too_long": LineError, "invalid_audio": LineError, "invalid_text": LineError, "text_too_long": LineError,
+    "unknown_line": LineError, "line_closed": LineError, "invalid_quality": LineError, "invalid_pronunciations": LineError,
 }
 _BY_CLOSE = {4400: InvalidRequest, 4401: AuthenticationError, 4402: InsufficientQuota, 4403: NotEnabled,
              4408: CallTimeLimit, 4429: RateLimited, 4503: AvatarUnavailable}
@@ -353,6 +355,19 @@ class LineStarted(AvatarEvent):
 
 
 @dataclasses.dataclass
+class LinePiece(AvatarEvent):
+    """`avatar.line.piece` (render-text): a piece of a line has been voiced. `text` is the text you sent for it,
+    `start_ms` and `end_ms` where its sound begins and ends on the LINE's own clock (0 = the line's first sound; add
+    the `at_ms` of the line's `LineStarted` for the stream clock). `index` counts the line's pieces from 0. Sent when
+    the piece is voiced, normally before it plays: show `text` when the clock reaches `start_ms`."""
+    line_id: str = ""
+    index: int = 0
+    text: str = ""
+    start_ms: float = 0.0
+    end_ms: float = 0.0
+
+
+@dataclasses.dataclass
 class LineDone(AvatarEvent):
     """`avatar.line.done`: `status` is "completed", "interrupted" or "failed"."""
     line_id: str = ""
@@ -472,6 +487,9 @@ def parse_event(data: dict) -> AvatarEvent:
         return AudioDelta(raw={"type": t}, audio=base64.b64decode(data.get("delta") or ""), line_id=data.get("line_id"))
     if t == "avatar.line.started":
         return LineStarted(raw=data, line_id=data.get("line_id") or "", at_ms=_ms(data, "at_ms", 0))
+    if t == "avatar.line.piece":
+        return LinePiece(raw=data, line_id=data.get("line_id") or "", index=int(data.get("index") or 0),
+                         text=data.get("text") or "", start_ms=_ms(data, "start_ms", 0), end_ms=_ms(data, "end_ms", 0))
     if t == "avatar.line.done":
         return LineDone(raw=data, line_id=data.get("line_id") or "", status=data.get("status") or "")
     if t == "conversation.item.input_audio_transcription.completed":
@@ -876,7 +894,8 @@ class Avatar:
                 instructions: str | None = None, input_sample_rate: int = AUDIO_RATE, record: bool = False,
                 client_secret: str | ClientSecret | None = None, mode: str | None = None,
                 video_format: str | None = None, output: str | None = None, transport: str | None = None,
-                livekit_room: "LiveKitJoin | dict | None" = None, **realtime_settings) -> "_Connect":
+                livekit_room: "LiveKitJoin | dict | None" = None, quality: str | None = None,
+                normalize: bool | None = None, pronunciations: dict | None = None, **realtime_settings) -> "_Connect":
         """Open a call: `async with client.avatar.connect(...) as call:`.
 
         mode           "conversational" (default: the avatar listens and answers), "render-audio" (you stream
@@ -907,6 +926,11 @@ class Avatar:
                        instead of in a Newera room. Needs `transport="livekit"` (ValueError otherwise) and the host
                        enabled by Newera for your account (else `ByoRefused`). `call.livekit` then has `byo=True` and no
                        viewer token. See `call.on_livekit_disconnected`.
+        quality, normalize, pronunciations
+                       render-text only: the defaults of every line that does not say otherwise (a line's own value
+                       wins): `quality` "instant", "balanced" or "studio" (default studio), `normalize` (default True:
+                       numbers, times and amounts are read as words, as in newera-tts), `pronunciations`
+                       ({"Newera": "نيو إيرا"}). Sent as `voice_quality`, `normalize` and `pronunciations` of the session.
         video_format   websocket transport only (the livekit transport has no video_format).
                        "h264" (default: H.264 access units, under 1 Mbit/s; decoded with PyAV, which the SDK installs;
                        `newera.h264.H264Decoder` or `LipSyncPlayer` do it for you) or "jpeg" (JPEG frames, several
@@ -955,6 +979,12 @@ class Avatar:
         if transport == "websocket" and video_format == "h264":
             from .h264 import require_av
             require_av()                    # before any connection: a missing PyAV must not surface mid-call
+        defaults = text_options(quality=quality, normalize=normalize, pronunciations=pronunciations)
+        if defaults and mode != "render-text":
+            raise ValueError("quality, normalize and pronunciations are the defaults of render-text lines "
+                             '(mode="render-text").')
+        if "quality" in defaults:
+            defaults["voice_quality"] = defaults.pop("quality")
         if mode == "conversational":
             session = build_session(avatar=avatar, voice=voice, language=language, image=image, face_crop=face_crop,
                                     idle_video=idle_video, instructions=instructions,
@@ -964,6 +994,7 @@ class Avatar:
                 raise ValueError("language, instructions, model, input_sample_rate and realtime settings are for "
                                  "conversational mode; the render modes take only the face options.")
             session = build_session(avatar=avatar, voice=None, image=image, face_crop=face_crop, idle_video=idle_video)
+            session.update(defaults)
         if livekit_room is not None:
             session["avatar_livekit"] = livekit_room.as_dict()
         return _Connect(self._client, session, model, record, client_secret, mode, video_format, output, transport)
@@ -1092,22 +1123,51 @@ class _Connect:
             await self.call.close()
 
 
+def text_options(*, voice: str | None = None, quality: str | None = None, normalize: bool | None = None,
+                 pronunciations: dict | None = None) -> dict:
+    """The options of a render-text line as the fields of its event, validated (ValueError)."""
+    out: dict = {}
+    if voice is not None:
+        if voice not in VOICES:
+            raise ValueError("voice must be one of %s, not %r" % (", ".join(VOICES), voice))
+        out["voice"] = voice
+    if quality is not None:
+        if quality not in QUALITIES:
+            raise ValueError("quality must be one of %s, not %r" % (", ".join(QUALITIES), quality))
+        out["quality"] = quality
+    if normalize is not None:
+        if not isinstance(normalize, bool):
+            raise ValueError("normalize must be True or False, not %r" % (normalize,))
+        out["normalize"] = normalize
+    if pronunciations is not None:
+        if (not isinstance(pronunciations, dict)
+                or not all(isinstance(k, str) and k.strip() and isinstance(v, str) and v.strip()
+                           for k, v in pronunciations.items())):
+            raise ValueError('pronunciations must be a dict of words and how to say them: {"Newera": "نيو إيرا"}')
+        out["pronunciations"] = dict(pronunciations)
+    return out
+
+
 class Line:
-    """One line of speech of a render-mode call, from `call.start_line()`, `call.send_line()` or `call.speak()`.
+    """One line of speech of a render-mode call, from `call.start_line()`, `call.send_line()`, `call.speak()`,
+    `call.start_text_line()` or `call.stream_text()`.
 
     Its state follows the server: `await line.wait_started()` (the first speaking frame is about to play) and
     `status = await line.wait()` ("completed", "interrupted" or "failed"). Feed audio with `append()` while
     you synthesise it, or hand `stream()` an iterator; leaving `async with` (or `end()`) closes the line."""
 
-    def __init__(self, call: "AvatarCall", line_id: str, kind: str):
+    def __init__(self, call: "AvatarCall", line_id: str, kind: str, options: dict | None = None):
         self.call, self.id, self.kind = call, line_id, kind
+        self.options = dict(options or {})          # render-text: the line's voice, quality, normalize, pronunciations
+        self.pieces: list[LinePiece] = []           # render-text: the pieces voiced so far, with their times
+        self._open_event: str | None = None         # the event id that opened a streamed text line
         self.status: str | None = None              # None until the server says it is done
         self.error: AvatarError | None = None       # why it failed, when the server refused or the call dropped
         self._started = asyncio.Event()
         self._done = asyncio.Event()
         self._ended = kind == "text"                # nothing more to send
         self._cut = False                           # interrupted: no more audio is taken
-        self._sent = kind == "text"                 # the server knows this line
+        self._sent = kind == "text"                 # the server knows this line (a streamed text line: once its text began)
 
     def __repr__(self) -> str:
         return "Line(%r, %s)" % (self.id, self.status or ("ended" if self._ended else "open"))
@@ -1171,6 +1231,50 @@ class Line:
         if self.kind == "audio" and not self._cut and not self._done.is_set():
             self._sent = True
             await self.call._line_event(self, "avatar.line.end")
+        elif self.kind == "stream-text" and not self._cut and not self._done.is_set():
+            if not self._sent:                       # nothing was written: open the line (empty) so it can end
+                await self._delta("")
+            await self.call._line_event(self, "avatar.line.text.end")
+
+    async def _delta(self, text: str) -> None:
+        self._sent = True
+        fields = {"text": text}
+        if self._open_event is None:                 # the first delta opens the line and carries its options
+            fields.update(self.options)
+            self._open_event = "line:%s:%d" % (self.id, self.call._seq + 1)    # the id _line_event is about to use
+        await self.call._line_event(self, "avatar.line.text.delta", **fields)
+
+    async def append_text(self, text: str) -> bool:
+        """render-text, streamed line: send a part of the line's text, as it arrives from a language model. Newera
+        starts speaking when the first clause is complete. True when it was sent, False when the line was
+        interrupted (stop feeding it). Send the text exactly as it arrives: spaces and line breaks included."""
+        if self.kind != "stream-text":
+            raise WrongMode("wrong_mode", "Only a line from start_text_line() or stream_text() takes streamed text.")
+        if self._ended:
+            raise RuntimeError("line %r has ended" % self.id)
+        if self._cut or self._done.is_set():
+            return False
+        if text:
+            await self._delta(text)
+        return True
+
+    async def stream_text(self, chunks: "Iterable[str] | AsyncIterator[str]", *, end: bool = True) -> bool:
+        """Send every piece of text of a (async) iterator, e.g. a language model's stream, then end the line.
+        Stops early, without error, when the line is interrupted; returns False in that case."""
+        ok = True
+        if hasattr(chunks, "__aiter__"):
+            async for piece in chunks:          # type: ignore[union-attr]
+                if not await self.append_text(piece):
+                    ok = False
+                    break
+        else:
+            for piece in chunks:                # type: ignore[union-attr]
+                if not await self.append_text(piece):
+                    ok = False
+                    break
+        if end and ok:
+            await self.end()
+        return ok
 
     async def wait_started(self, timeout: float | None = None) -> bool:
         """True once `avatar.line.started` came; False if the line finished without ever speaking."""
@@ -1210,7 +1314,7 @@ class AvatarCall:
         self.video_format = video_format              # what the server answers in avatar.ready, once started
         self.lines: dict[str, Line] = {}              # the lines you started (render modes), by id
         self.last_error: AvatarError | None = None    # the last `error` event, as its exception
-        self._line_callbacks: dict[str, list] = {"started": [], "done": [], "livekit_disconnected": []}
+        self._line_callbacks: dict[str, list] = {"started": [], "done": [], "piece": [], "livekit_disconnected": []}
         self.livekit_disconnected: LiveKitDisconnected | None = None   # set when your own LiveKit room dropped the avatar
         self._seq = 0
         self._session = session
@@ -1307,6 +1411,11 @@ class AvatarCall:
                 line._started.set()
                 line._finish(ev.status)
             self._fire("done", ev)
+        elif isinstance(ev, LinePiece):
+            line = self.lines.get(ev.line_id)
+            if line is not None:
+                line.pieces.append(ev)
+            self._fire("piece", ev)
         elif isinstance(ev, LiveKitDisconnected):
             self.livekit_disconnected = ev
             self._fire("livekit_disconnected", ev)
@@ -1314,7 +1423,9 @@ class AvatarCall:
             self.last_error = ev.exception(self.close_code)
             eid = ev.event_id or ""
             line = self.lines.get(eid[5:].rsplit(":", 1)[0]) if eid.startswith("line:") else None
-            if line is not None:          # the server refused this line's event: no `done` will come
+            if line is not None and line.kind == "stream-text" and eid != line._open_event:
+                line.error = self.last_error      # a later delta was refused: the line itself goes on
+            elif line is not None:          # the server refused this line's event: no `done` will come
                 line._finish("failed", self.last_error)
 
     def _fire(self, name: str, ev: AvatarEvent) -> None:
@@ -1430,7 +1541,7 @@ class AvatarCall:
         if self.mode != mode:
             raise WrongMode("wrong_mode", "This is a %s call; that needs %s." % (self.mode, mode))
 
-    def _new_line(self, line_id: str | None, kind: str) -> Line:
+    def _new_line(self, line_id: str | None, kind: str, options: dict | None = None) -> Line:
         if line_id is None:
             self._seq += 1
             line_id = "line-%d" % self._seq
@@ -1439,12 +1550,14 @@ class AvatarCall:
         old = self.lines.get(line_id)
         if old is not None and not old.done:
             raise LineError("duplicate_line", "line_id %r is already in use." % line_id)
-        line = self.lines[line_id] = Line(self, line_id, kind)
+        line = self.lines[line_id] = Line(self, line_id, kind, options)
         return line
 
-    async def _line_event(self, line: Line, kind: str, **fields) -> None:
+    async def _line_event(self, line: Line, kind: str, **fields) -> str:
         self._seq += 1
-        await self._send({"type": kind, "line_id": line.id, "event_id": "line:%s:%d" % (line.id, self._seq), **fields})
+        event_id = "line:%s:%d" % (line.id, self._seq)
+        await self._send({"type": kind, "line_id": line.id, "event_id": event_id, **fields})
+        return event_id
 
     def start_line(self, line_id: str | None = None) -> Line:
         """render-audio: begin a line (nothing is sent until its first `append`). `line_id` is yours (1 to 64
@@ -1461,15 +1574,37 @@ class AvatarCall:
         await line.stream(pcm[i:i + step] for i in range(0, len(pcm), step))
         return line
 
-    async def speak(self, text: str, line_id: str | None = None, *, voice: str | None = None) -> Line:
-        """render-text: the exact text of a line (up to 2000 characters); Newera voices it and lip-syncs the
-        voice. Nothing is rewritten. `voice` picks the voice for this line (and the ones after it). Returns the Line."""
+    async def speak(self, text: str, line_id: str | None = None, *, voice: str | None = None, quality: str | None = None,
+                    normalize: bool | None = None, pronunciations: dict | None = None) -> Line:
+        """render-text: the exact text of a line; Newera voices it and lip-syncs the voice. It is spoken piece by
+        piece, so it starts after its first clause. `voice` picks the voice for this line (and the ones after it).
+        `quality` is "instant", "balanced" or "studio" (default studio). `normalize=False` speaks the text exactly
+        as written (by default numbers, times and amounts are read as words, in the language of each sentence).
+        `pronunciations={"Newera": "نيو إيرا"}` respells words. `<break time="500ms"/>` in the text is a pause of
+        exactly that length. Returns the Line; its `pieces` fill as they are voiced (`on_line_piece`)."""
         self._need_mode("render-text")
-        line = self._new_line(line_id, "text")
-        fields: dict = {"text": text}
-        if voice:
-            fields["voice"] = voice
-        await self._line_event(line, "avatar.line.text", **fields)
+        options = text_options(voice=voice, quality=quality, normalize=normalize, pronunciations=pronunciations)
+        line = self._new_line(line_id, "text", options)
+        await self._line_event(line, "avatar.line.text", text=text, **options)
+        return line
+
+    def start_text_line(self, line_id: str | None = None, *, voice: str | None = None, quality: str | None = None,
+                        normalize: bool | None = None, pronunciations: dict | None = None) -> Line:
+        """render-text: begin a line whose text is still being written. Nothing is sent until its first
+        `append_text()`; the options go with it. Then `await line.append_text(piece)` as text arrives (or
+        `await line.stream_text(iterator)`) and `await line.end()`. Newera starts speaking when the first clause is
+        complete, while the rest is still arriving. Use it as `async with call.start_text_line() as line:`."""
+        self._need_mode("render-text")
+        options = text_options(voice=voice, quality=quality, normalize=normalize, pronunciations=pronunciations)
+        return self._new_line(line_id, "stream-text", options)
+
+    async def stream_text(self, chunks: "Iterable[str] | AsyncIterator[str]", line_id: str | None = None, *,
+                          voice: str | None = None, quality: str | None = None, normalize: bool | None = None,
+                          pronunciations: dict | None = None) -> Line:
+        """render-text: a whole line from a stream of text (for example a language model's deltas), sent as it
+        arrives and ended. Returns the Line."""
+        line = self.start_text_line(line_id, voice=voice, quality=quality, normalize=normalize, pronunciations=pronunciations)
+        await line.stream_text(chunks)
         return line
 
     async def request_keyframe(self) -> None:
@@ -1502,6 +1637,13 @@ class AvatarCall:
     def on_line_done(self, callback: Callable[[LineDone], Any]) -> Callable:
         """Call `callback(LineDone)` at each `avatar.line.done` (completed, interrupted or failed)."""
         self._line_callbacks["done"].append(callback)
+        return callback
+
+    def on_line_piece(self, callback: Callable[[LinePiece], Any]) -> Callable:
+        """Call `callback(LinePiece)` (a function or a coroutine function) each time a piece of a render-text line has
+        been voiced: its text and its `start_ms`/`end_ms` on the line's clock, so a transcript can follow the speech
+        piece by piece. The same events come out of `events()`, and fill `line.pieces`."""
+        self._line_callbacks["piece"].append(callback)
         return callback
 
     def on_livekit_disconnected(self, callback: Callable[[LiveKitDisconnected], Any]) -> Callable:

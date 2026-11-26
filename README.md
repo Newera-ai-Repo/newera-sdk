@@ -247,7 +247,7 @@ modes the avatar does not listen or think: you give it **lines** and it speaks t
 (request access for the render avatar), and only the face options apply (`avatar`, `image`, `idle_video`, `record`).
 
 * `mode="render-audio"`: you stream your own PCM16 mono 24 kHz audio, line by line, and the face lip-syncs it exactly.
-* `mode="render-text"`: you send the exact text of each line (up to 2000 characters); Newera voices it. Nothing is rewritten.
+* `mode="render-text"`: you send the exact text of each line (up to 2000 characters); Newera voices it. Nothing is answered or changed (numbers, times and amounts are read as words; `normalize=False` turns that off).
 
 ```python
 async with client.avatar.connect(mode="render-audio") as call:
@@ -264,7 +264,8 @@ async with client.avatar.connect(mode="render-text") as call:
 * `call.start_line(line_id=None) -> Line` (render-audio), then `await line.append(pcm) -> bool`,
   `await line.stream(iterable_or_async_iterator)` (appends every piece, then ends) and `await line.end()`.
   `await call.send_line(pcm, line_id=None)` sends a whole line you already have.
-* `await call.speak(text, line_id=None, *, voice=None) -> Line` (render-text).
+* `await call.speak(text, line_id=None, *, voice=None, quality=None, normalize=None, pronunciations=None) -> Line` (render-text).
+  See "Text that streams in" below for streamed text, options and the piece-timing events.
 * `await line.wait_started()`, `await line.wait(timeout=None, strict=False) -> status`, `line.status`, `line.error`.
   Or callbacks for every line: `call.on_line_started(cb)` and `call.on_line_done(cb)` receive `LineStarted(line_id, at_ms)`
   and `LineDone(line_id, status)`; the same two arrive in `call.events()`.
@@ -295,6 +296,39 @@ Browsers: `await client.avatar.create_session(mode="render-text")` checks your a
 `wss://api.newera.ai/v1/avatar?mode=render-text` with the same subprotocols as before.
 
 Examples: [`avatar_render_audio.py`](examples/avatar_render_audio.py), [`avatar_render_text.py`](examples/avatar_render_text.py).
+
+### Text that streams in, line options and following the speech (render-text)
+
+A render-text line is voiced a sentence or clause at a time, each piece as soon as it is complete, so even a whole text
+starts to speak after its first clause. When the text comes from a language model, send it as it arrives:
+
+```python
+async with client.avatar.connect(mode="render-text", quality="balanced") as call:       # session defaults for every line
+    line = await call.stream_text(llm_deltas(), "answer-1")        # any (async) iterator of str; the line ends at its end
+    # or by hand:
+    async with call.start_text_line("answer-2", voice="male") as line:
+        async for delta in llm_deltas():
+            await line.append_text(delta)                            # speaking starts after the first clause
+    print(await line.wait(strict=True))
+```
+
+* Options of a line, on `speak()`, `start_text_line()` and `stream_text()`: `voice` ("male" or "female"), `quality`
+  ("instant", "balanced" or "studio", the default; the same tiers as `newera-tts`), `normalize` (default `True`: numbers,
+  times and amounts are read as words, in the language of each sentence; `False` speaks the text exactly as written) and
+  `pronunciations={"Newera": "نيو إيرا"}` (whole words, any case, applied after numbers are read). A line's own value wins
+  over the session default of `connect(quality=..., normalize=..., pronunciations=...)` (render-text only).
+* `<break time="500ms"/>` in the text is a pause of exactly that length (also `time="1.5s"`; at most 5 seconds each).
+* `await line.append_text(text) -> bool` (False after an interrupt: stop feeding), `await line.stream_text(iterable_or_async_iterator)`
+  (appends every piece, then ends), `await line.end()`.
+* The pieces: every voiced piece arrives as `LinePiece(line_id, index, text, start_ms, end_ms)` in `call.events()`, in
+  `call.on_line_piece(callback)` and in `line.pieces`. The times are on the line's own clock (0 is its first sound; add
+  `LineStarted.at_ms` for the stream's clock); `text` is what you sent for the piece. The event arrives when the piece is
+  voiced, usually before it plays, so show the text when the clock reaches `start_ms`. Piece-exact: words inside a piece are
+  not timed.
+
+```python
+call.on_line_piece(lambda p: print("%5d-%5d ms  %s" % (p.start_ms, p.end_ms, p.text)))
+```
 
 ### Video format and output
 
@@ -401,6 +435,23 @@ opens `wss://api.newera.ai/v1/avatar` (with `?transport=livekit`, see [Transport
 `client.avatar.connect(client_secret=secret)`.
 
 Only send a photo (`image=`) of a person who agreed to be animated, and tell them what it is for.
+
+## Text to speech: `client.audio.speech`
+
+```python
+client = Newera()
+wav = await client.audio.speech("أهلًا وسهلًا، موعدك بكرة الساعة 10:30.", voice="female", quality="balanced")   # bytes of a WAV
+
+async for chunk in client.audio.speech(long_text, response_format="pcm", stream=True):   # raw 24 kHz 16-bit mono
+    player.write(chunk)                                      # the first sentence arrives while the rest is being voiced
+```
+
+`stream=True` sends each piece of audio as soon as it is voiced, so playback starts after the first sentence. With
+`response_format="wav"` (the default) the first chunk is a WAV header whose length fields are open ("until the stream ends"),
+which players read; pcm is raw. You are billed for the audio produced, also if you stop iterating early (the connection is
+closed). An error before the first chunk raises the typed exception; one after it raises `AvatarError("stream_interrupted")`.
+Other arguments: `voice`, `quality`, `normalize`, `pronunciations`, `speed`, `language`, `model`. Pauses are written in
+the text: `<break time="500ms"/>`.
 
 ## Tools
 
@@ -570,6 +621,8 @@ Full list: [CHANGELOG.md](CHANGELOG.md).
   timestamps (`audio_start_ms`, `audio_end_ms`, `line_id`), `LipSyncPlayer`, `retry_after_s`, new typed errors. Additive: conversational calls are unchanged.
 * 0.3.1: documentation and message wording for the avatar. No change in behaviour.
 * 0.3.0: the talking avatar (`client.avatar`, `newera avatar`).
+
+* 0.8.0: text that streams in (`start_text_line`, `stream_text`, `append_text`), `quality`, `normalize` and `pronunciations` per line and per session in render-text, `<break time="500ms"/>` pauses, the piece-timing event `LinePiece` (`call.on_line_piece`, `line.pieces`), and `client.audio.speech(..., stream=True)`. Additive.
 
 ## Releasing
 
