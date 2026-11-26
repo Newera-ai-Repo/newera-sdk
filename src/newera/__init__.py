@@ -6,7 +6,7 @@
 from .agent import DEFAULT_URL, Call, Event, NeweraError, Reply, ToolSpec, VoiceAgent
 from .avatar import (AudioDelta, Availability, AvatarBusy, AvatarCall, AvatarError, AvatarEvent, AvatarReady,
                      AvatarReply, AvatarUnavailable, AuthenticationError, CallTimeLimit, ClientSecret, ErrorEvent,
-                     InsufficientQuota, Interrupted, InvalidRequest, Line, LineDone, LineError, LinePiece, LineStarted, NotEnabled, OtherEvent, RateLimited,
+                     InsufficientQuota, Interrupted, InvalidRequest, Line, LineDone, LineError, LinePiece, LineStarted, LineWords, Word, NotEnabled, OtherEvent, RateLimited,
                      ReplyText, ReplyTextDelta, ResponseDone, SessionSummary, SpeechStarted, SpeechStopped,
                      Timeline, TransportUnavailable, Unavailable, UserTranscript, VideoChunk, WrongMode, WrongTransport,
                      LiveKitRoom, LiveKitJoin, LiveKitDisconnected, ByoRefused, DEFAULT_TRANSPORT, TRANSPORTS)
@@ -34,5 +34,5 @@ __all__ = ["VoiceAgent", "Call", "Event", "Reply", "ToolSpec", "NeweraError", "D
            "ErrorEvent", "OtherEvent",
            "AvatarError", "InvalidRequest", "AuthenticationError", "InsufficientQuota", "NotEnabled",
            "CallTimeLimit", "RateLimited", "AvatarBusy", "AvatarUnavailable",
-           "WrongMode", "WrongTransport", "TransportUnavailable", "LiveKitRoom", "LiveKitJoin", "LiveKitDisconnected", "ByoRefused", "DEFAULT_TRANSPORT", "TRANSPORTS", "LineError", "Line", "LineStarted", "LineDone", "LinePiece", "LipSyncPlayer", "H264Decoder", "DecodedFrame"]
-__version__ = "0.9.0"
+           "WrongMode", "WrongTransport", "TransportUnavailable", "LiveKitRoom", "LineWords", "Word", "LiveKitJoin", "LiveKitDisconnected", "ByoRefused", "DEFAULT_TRANSPORT", "TRANSPORTS", "LineError", "Line", "LineStarted", "LineDone", "LinePiece", "LipSyncPlayer", "H264Decoder", "DecodedFrame"]
+__version__ = "0.10.0"

@@ -10,7 +10,8 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from websockets.asyncio.server import serve
 
-from newera import AvatarError, InvalidRequest, LineDone, LineError, LinePiece, LineStarted, Newera, WrongMode
+from newera import (AvatarError, InvalidRequest, LineDone, LineError, LinePiece, LineStarted, LineWords, Newera, Word,
+                    WrongMode)
 from newera.avatar import AUDIO_RATE, parse_event, text_options
 
 PIECE_MS, GAP_MS = 1000, 190
@@ -30,7 +31,8 @@ class FakeText:
     (avatar.line.text) or avatar.line.text.end. A text of "REFUSE" on a first event is `invalid_quality`; a delta
     whose text is "TOOLONG" is refused as `text_too_long` (the line goes on)."""
 
-    def __init__(self):
+    def __init__(self, words=True):
+        self.words = words
         self.received: list[dict] = []
         self.paths: list[str] = []
         self.state: dict[str, dict] = {}
@@ -65,6 +67,12 @@ class FakeText:
             await send({"type": "avatar.line.piece", "event_id": "evt_p", "line_id": line, "index": st["n"], "text": text,
                         "start_ms": start, "end_ms": start + PIECE_MS})
             st["pos"], st["n"] = start + PIECE_MS, st["n"] + 1
+            if self.words:
+                names = text.rstrip(".").split()
+                step = PIECE_MS // len(names)
+                await send({"type": "avatar.line.words", "event_id": "evt_w", "line_id": line, "piece_index": st["n"] - 1,
+                            "words": [{"word": n, "start_ms": start + k * step, "end_ms": start + (k + 1) * step}
+                                      for k, n in enumerate(names)], "approximate": text.startswith("Approx")})
 
         async def finish(line):
             await send({"type": "avatar.line.started", "line_id": line, "at_ms": 480})
@@ -489,3 +497,67 @@ def test_speech_checks_its_arguments_before_any_request():
     with pytest.raises(AvatarError) as exc:
         run(no_key.audio.speech("x"))
     assert exc.value.code == "invalid_api_key"
+
+
+# ------------------------------------------------------------------------------------------------ word timings
+
+def test_line_words_event_parses():
+    ev = parse_event({"type": "avatar.line.words", "event_id": "evt_1", "line_id": "a", "piece_index": 1, "approximate": True,
+                      "words": [{"word": "Hello", "start_ms": 1190, "end_ms": 1500}, {"word": "there", "start_ms": 1500, "end_ms": 2190}]})
+    assert isinstance(ev, LineWords)
+    assert (ev.line_id, ev.piece_index, ev.approximate) == ("a", 1, True)
+    assert ev.words == [Word("Hello", 1190.0, 1500.0), Word("there", 1500.0, 2190.0)]
+    bare = parse_event({"type": "avatar.line.words", "line_id": "a"})
+    assert bare.words == [] and bare.approximate is False and bare.piece_index == 0
+
+
+def test_words_arrive_by_callback_events_and_line_words():
+    async def go():
+        async with FakeText() as srv:
+            async with connect(srv) as call:
+                got, evs = [], []
+                call.on_line_words(got.append)
+                line = await call.speak("Hello there. Approx one two.", "a")
+                assert await line.wait(timeout=5, strict=True) == "completed"
+                async for ev in call.events():
+                    evs.append(ev)
+                    if isinstance(ev, LineDone):
+                        break
+                assert [(w.piece_index, [x.word for x in w.words], w.approximate) for w in line.words] == [
+                    (0, ["Hello", "there"], False), (1, ["Approx", "one", "two"], True)]
+                assert got == line.words
+                assert line.words[0].words[1].start_ms == 500 and line.words[0].words[1].end_ms == 1000
+    run(go())
+
+
+def test_words_come_in_events_after_their_piece():
+    async def go():
+        async with FakeText() as srv:
+            async with connect(srv) as call:
+                line = await call.speak("One two.", "a")
+                kinds = []
+                async for ev in call.events():
+                    kinds.append(type(ev).__name__)
+                    if isinstance(ev, LineDone):
+                        break
+                assert kinds.index("LinePiece") < kinds.index("LineWords")
+    run(go())
+
+
+def test_word_timings_false_is_sent_in_the_session_and_validated():
+    async def go():
+        async with FakeText(words=False) as srv:
+            async with connect(srv, word_timings=False) as call:
+                line = await call.speak("One two.", "a")
+                await line.wait(timeout=5, strict=True)
+                assert line.words == []
+            assert srv.received[0]["session"]["word_timings"] is False
+        async with FakeText() as srv:
+            async with connect(srv) as call:
+                pass
+            assert "word_timings" not in srv.received[0]["session"]
+    run(go())
+    with pytest.raises(ValueError):
+        Newera(api_key="nwc_test").avatar.connect("lama", mode="render-text", word_timings="no")
+    with pytest.raises(ValueError):
+        Newera(api_key="nwc_test").avatar.connect("lama", mode="render-audio", word_timings=False)

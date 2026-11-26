@@ -368,6 +368,27 @@ class LinePiece(AvatarEvent):
 
 
 @dataclasses.dataclass
+class Word:
+    """One timed word of a piece: `start_ms` and `end_ms` on the line's own clock (the clock of `LinePiece`)."""
+    word: str = ""
+    start_ms: float = 0.0
+    end_ms: float = 0.0
+
+
+@dataclasses.dataclass
+class LineWords(AvatarEvent):
+    """`avatar.line.words` (render-text): the words of piece `piece_index` of a line, each with its start and end on the
+    line's own clock. Sent shortly after the piece's `LinePiece`, while the piece plays, in piece order. `approximate`
+    is True when the times are an even spread over the piece (not measured): use them for a karaoke-style highlight,
+    not for frame-exact work. `word` is the word you sent when the spoken form has the same number of words
+    (a number read as one word stays as you wrote it), otherwise the spoken words (`25` -> `twenty five`)."""
+    line_id: str = ""
+    piece_index: int = 0
+    words: list[Word] = dataclasses.field(default_factory=list)
+    approximate: bool = False
+
+
+@dataclasses.dataclass
 class LineDone(AvatarEvent):
     """`avatar.line.done`: `status` is "completed", "interrupted" or "failed"."""
     line_id: str = ""
@@ -490,6 +511,11 @@ def parse_event(data: dict) -> AvatarEvent:
     if t == "avatar.line.piece":
         return LinePiece(raw=data, line_id=data.get("line_id") or "", index=int(data.get("index") or 0),
                          text=data.get("text") or "", start_ms=_ms(data, "start_ms", 0), end_ms=_ms(data, "end_ms", 0))
+    if t == "avatar.line.words":
+        return LineWords(raw=data, line_id=data.get("line_id") or "", piece_index=int(data.get("piece_index") or 0),
+                         words=[Word(word=w.get("word") or "", start_ms=_ms(w, "start_ms", 0), end_ms=_ms(w, "end_ms", 0))
+                                for w in (data.get("words") or []) if isinstance(w, dict)],
+                         approximate=bool(data.get("approximate")))
     if t == "avatar.line.done":
         return LineDone(raw=data, line_id=data.get("line_id") or "", status=data.get("status") or "")
     if t == "conversation.item.input_audio_transcription.completed":
@@ -895,7 +921,8 @@ class Avatar:
                 client_secret: str | ClientSecret | None = None, mode: str | None = None,
                 video_format: str | None = None, output: str | None = None, transport: str | None = None,
                 livekit_room: "LiveKitJoin | dict | None" = None, quality: str | None = None,
-                normalize: bool | None = None, pronunciations: dict | None = None, **realtime_settings) -> "_Connect":
+                normalize: bool | None = None, pronunciations: dict | None = None,
+                word_timings: bool | None = None, **realtime_settings) -> "_Connect":
         """Open a call: `async with client.avatar.connect(...) as call:`.
 
         mode           "conversational" (default: the avatar listens and answers), "render-audio" (you stream
@@ -931,6 +958,7 @@ class Avatar:
                        wins): `quality` "instant", "balanced" or "studio" (default studio), `normalize` (default True:
                        numbers, times and amounts are read as words, as in newera-tts), `pronunciations`
                        ({"Newera": "نيو إيرا"}). Sent as `voice_quality`, `normalize` and `pronunciations` of the session.
+        word_timings   render-text only: `False` turns the per-word `LineWords` events off (on by default).
         video_format   websocket transport only (the livekit transport has no video_format).
                        "h264" (default: H.264 access units, under 1 Mbit/s; decoded with PyAV, which the SDK installs;
                        `newera.h264.H264Decoder` or `LipSyncPlayer` do it for you) or "jpeg" (JPEG frames, several
@@ -983,6 +1011,12 @@ class Avatar:
         if defaults and mode != "render-text":
             raise ValueError("quality, normalize and pronunciations are the defaults of render-text lines "
                              '(mode="render-text").')
+        if word_timings is not None:
+            if not isinstance(word_timings, bool):
+                raise ValueError("word_timings must be True or False, not %r" % (word_timings,))
+            if mode != "render-text":
+                raise ValueError('word_timings is for mode="render-text".')
+            defaults["word_timings"] = word_timings
         if "quality" in defaults:
             defaults["voice_quality"] = defaults.pop("quality")
         if mode == "conversational":
@@ -1160,6 +1194,7 @@ class Line:
         self.call, self.id, self.kind = call, line_id, kind
         self.options = dict(options or {})          # render-text: the line's voice, quality, normalize, pronunciations
         self.pieces: list[LinePiece] = []           # render-text: the pieces voiced so far, with their times
+        self.words: list[LineWords] = []            # render-text: the words of each piece, as they arrive
         self._open_event: str | None = None         # the event id that opened a streamed text line
         self.status: str | None = None              # None until the server says it is done
         self.error: AvatarError | None = None       # why it failed, when the server refused or the call dropped
@@ -1314,7 +1349,7 @@ class AvatarCall:
         self.video_format = video_format              # what the server answers in avatar.ready, once started
         self.lines: dict[str, Line] = {}              # the lines you started (render modes), by id
         self.last_error: AvatarError | None = None    # the last `error` event, as its exception
-        self._line_callbacks: dict[str, list] = {"started": [], "done": [], "piece": [], "livekit_disconnected": []}
+        self._line_callbacks: dict[str, list] = {"started": [], "done": [], "piece": [], "words": [], "livekit_disconnected": []}
         self.livekit_disconnected: LiveKitDisconnected | None = None   # set when your own LiveKit room dropped the avatar
         self._seq = 0
         self._session = session
@@ -1416,6 +1451,11 @@ class AvatarCall:
             if line is not None:
                 line.pieces.append(ev)
             self._fire("piece", ev)
+        elif isinstance(ev, LineWords):
+            line = self.lines.get(ev.line_id)
+            if line is not None:
+                line.words.append(ev)
+            self._fire("words", ev)
         elif isinstance(ev, LiveKitDisconnected):
             self.livekit_disconnected = ev
             self._fire("livekit_disconnected", ev)
@@ -1644,6 +1684,14 @@ class AvatarCall:
         been voiced: its text and its `start_ms`/`end_ms` on the line's clock, so a transcript can follow the speech
         piece by piece. The same events come out of `events()`, and fill `line.pieces`."""
         self._line_callbacks["piece"].append(callback)
+        return callback
+
+    def on_line_words(self, callback: Callable[[LineWords], Any]) -> Callable:
+        """Call `callback(LineWords)` (a function or a coroutine function) with the timed words of each piece of a
+        render-text line (`ev.words`: `Word(word, start_ms, end_ms)`, `ev.approximate`). They arrive after the piece's
+        `LinePiece`, while it plays. The same events come out of `events()` and fill `line.words`. Turn them off with
+        `connect(word_timings=False)`."""
+        self._line_callbacks["words"].append(callback)
         return callback
 
     def on_livekit_disconnected(self, callback: Callable[[LiveKitDisconnected], Any]) -> Callable:

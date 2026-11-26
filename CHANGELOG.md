@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.0
+
+Word timings in render-text. Additive: nothing changes for existing code except that the new event arrives (an event type
+older versions report as `OtherEvent`). Needs the Newera Core release that sends `avatar.line.words`.
+
+Added
+* `Word(word, start_ms, end_ms)` and `LineWords(line_id, piece_index, words, approximate)` (`avatar.line.words`): the words
+  of a voiced piece with their times on the line's own clock (the clock of `LinePiece`). In `call.events()`,
+  `call.on_line_words(callback)` and `line.words`. `approximate=True` means the times are an even spread over the piece.
+* `connect(..., word_timings=False)` turns the event off for the call (render-text only; on by default).
+
 ## 0.9.0
 
 Speech to text. Additive: nothing changes for existing code. Uses `POST /v1/audio/transcriptions` and
