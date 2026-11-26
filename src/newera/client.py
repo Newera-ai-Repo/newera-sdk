@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 
 from .avatar import DEFAULT_BASE_URL, Avatar, error_for
+from .speech import Audio
 
 
 class Newera:
@@ -27,6 +28,7 @@ class Newera:
         self.base_url = (base_url or os.environ.get("NEWERA_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
         self.headers = dict(headers or {})
         self.avatar = Avatar(self)
+        self.audio = Audio(self)
 
     @property
     def avatar_ws_url(self) -> str:
