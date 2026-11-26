@@ -453,6 +453,45 @@ closed). An error before the first chunk raises the typed exception; one after i
 Other arguments: `voice`, `quality`, `normalize`, `pronunciations`, `speed`, `language`, `model`. Pauses are written in
 the text: `<break time="500ms"/>`.
 
+## Speech to text: `client.audio.transcribe`
+
+```python
+client = Newera()
+
+result = await client.audio.transcribe("meeting.wav", language="ar")        # a path, bytes or a binary file object
+print(result.text, result.audio_seconds)                                     # audio_seconds: the billed length
+```
+
+`transcribe(file, *, language=None, prompt=None, vad=True, response_format="json", temperature=None)` returns
+`Transcription(text, audio_seconds)`. Send `language="ar"` (or `"en"`): the language is not detected. With `vad=True`
+(the default) a clip with no speech returns `""` without running the model, and is still billed for its length; pass
+`vad=False` if you already remove silence. Files are wav, mp3, m4a, ogg, flac or webm, up to 25 MB. Errors raise the same
+exceptions as the rest of the SDK (`AuthenticationError`, `InsufficientQuota`, `NotEnabled`, `RateLimited`, `InvalidRequest`).
+
+### Live: `client.audio.transcribe_stream`
+
+```python
+from newera import Segment, Done, stt
+
+async with client.audio.transcribe_stream(language="ar", sample_rate=16000,
+                                          on_segment=lambda s: print(s.text)) as stream:
+    await stream.send(pcm_chunk)          # PCM 16-bit little-endian mono, any size, as you capture it
+    await stream.commit()                 # no more audio: the rest is transcribed, then Done
+    async for event in stream:            # stt.SpeechStarted, stt.SpeechStopped, Segment, Done
+        if isinstance(event, Segment):
+            print(event.start_ms, event.end_ms, event.text)
+        elif isinstance(event, Done):
+            print(event.text, event.audio_ms, event.billed_seconds)
+
+    # or stream a WAV file at real-time pace (rate must match sample_rate), then commit:
+    await stream.send_wav("clip.wav")
+```
+
+A segment is one stretch of speech between pauses: its text arrives shortly after the speaker pauses, and every segment is
+final. Times are milliseconds from the first sample sent. `sample_rate` is 8000, 16000, 24000 or 48000. Billing is per second
+of audio sent, rounded up once at the end. A refusal at connect raises the typed exception from `async with`; a problem with
+one segment is a `StreamError` event and the stream goes on. Examples: `examples/stt_file.py`, `examples/stt_stream.py`.
+
 ## Tools
 
 `@agent.tool` turns a function into a tool. The schema comes from the function:
@@ -603,6 +642,8 @@ real avatar and is skipped unless `NEWERA_API_KEY` is set (use a key enabled for
 
 Full list: [CHANGELOG.md](CHANGELOG.md).
 
+* 0.9.0: speech to text: `client.audio.transcribe(...)` for files and `client.audio.transcribe_stream(...)` for live audio
+  (`Segment`, `Done`, `stt.SpeechStarted`, `stt.SpeechStopped`). Additive.
 * 0.7.0: join your own LiveKit room: `connect(..., livekit_room=LiveKitJoin(url, token, publish_on_behalf))`, `call.on_livekit_disconnected`,
   `ByoRefused`, `LiveKitRoom.byo`. Additive; see "Join your own LiveKit room".
 * 0.6.0: **behaviour change: the default avatar transport is now `livekit`.** `connect(...)` publishes the video and sound

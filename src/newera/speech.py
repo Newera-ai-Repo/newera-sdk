@@ -23,6 +23,7 @@ import urllib.request
 from typing import Any, AsyncIterator
 
 from .avatar import QUALITIES, error_for
+from . import stt
 
 RESPONSE_FORMATS = ("wav", "pcm")
 SAMPLE_RATE = 24000
@@ -30,7 +31,7 @@ _DONE = object()
 
 
 class Audio:
-    """`client.audio`: text to speech."""
+    """`client.audio`: text to speech (`speech`) and speech to text (`transcribe`, `transcribe_stream`)."""
 
     def __init__(self, client):
         self._client = client
@@ -58,6 +59,36 @@ class Audio:
         """
         body = _body(input, model, voice, quality, normalize, pronunciations, response_format, speed, language, stream)
         return self._stream(body) if stream else self._once(body)
+
+    async def transcribe(self, file, *, language: str | None = None, prompt: str | None = None, vad: bool = True,
+                         response_format: str = "json", temperature: float | None = None,
+                         model: str = stt.MODEL) -> "stt.Transcription":
+        """Speech to text for a file (`POST /v1/audio/transcriptions`, up to 25 MB; wav, mp3, m4a, ogg, flac, webm).
+
+        file             a path, the bytes, or a binary file object.
+        language         "ar" or "en". Send "ar" for Arabic: the language is not detected.
+        prompt           words to help the model (names, terms).
+        vad              True (default): a clip with no speech returns "" without running the model (it is still billed
+                         for its length). False if you already remove silence.
+        response_format  "json" (default) or "text"; `Transcription.text` is the text either way.
+        temperature      0 to 1.
+
+        Returns `Transcription(text, audio_seconds)`; `audio_seconds` is the billed length from the
+        `x-newera-audio-seconds` header. Errors raise the SDK exceptions (`AuthenticationError`, `InsufficientQuota`,
+        `NotEnabled`, `RateLimited`, `InvalidRequest`, ...).
+        """
+        return await asyncio.to_thread(stt.transcribe_blocking, self._client, file, language=language, prompt=prompt,
+                                       vad=vad, response_format=response_format, temperature=temperature, model=model)
+
+    def transcribe_stream(self, *, language: str | None = None, sample_rate: int = 16000, model: str = stt.MODEL,
+                          on_segment=None) -> "stt.TranscribeStream":
+        """Live speech to text: `async with client.audio.transcribe_stream(language="ar") as stream:` then
+        `await stream.send(pcm)`, `await stream.commit()` and `async for event in stream` (`Segment`, `SpeechStarted`,
+        `SpeechStopped`, `Done`). `on_segment(segment)` (sync or async) is called for each segment. Audio is PCM 16-bit
+        little-endian mono at `sample_rate` (8000, 16000, 24000 or 48000). `stream.send_wav(path)` streams a WAV file at
+        real-time pace."""
+        return stt.TranscribeStream(self._client, language=language, sample_rate=sample_rate, model=model,
+                                    on_segment=on_segment)
 
     async def _once(self, body: dict) -> bytes:
         return await asyncio.to_thread(self._read_all, body)

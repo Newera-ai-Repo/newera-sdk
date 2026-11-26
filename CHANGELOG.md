@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.9.0
+
+Speech to text. Additive: nothing changes for existing code. Uses `POST /v1/audio/transcriptions` and
+`wss://.../v1/audio/transcriptions/stream` of the `newera-stt` model.
+
+Added
+* `await client.audio.transcribe(file, *, language=None, prompt=None, vad=True, response_format="json", temperature=None)`
+  -> `Transcription(text, audio_seconds)`. `file` is a path, bytes or a binary file object. `audio_seconds` comes from
+  the `x-newera-audio-seconds` header (None if absent). `vad=True` returns `""` for a clip without speech. API errors raise the
+  existing exceptions (`AuthenticationError`, `InsufficientQuota`, `NotEnabled`, `RateLimited`, `InvalidRequest`).
+* `client.audio.transcribe_stream(language=None, sample_rate=16000, on_segment=None)`: an async context manager with
+  `send(pcm)`, `commit()`, `send_wav(path, realtime=True)`, `result()` and async iteration of typed events `stt.SpeechStarted`,
+  `stt.SpeechStopped`, `Segment`, `Done`, `StreamError` (a problem that does not end the stream). Refusals at connect raise
+  the typed exception (close codes 4400 to 4503). Also `stt.wav_info()` and `stt.wav_chunks()`.
+* README section "Speech to text"; examples `stt_file.py` and `stt_stream.py`.
+
 ## 0.8.0
 
 Streamed text lines, per-line voice options, piece timing and streaming speech. Additive: nothing changes for existing

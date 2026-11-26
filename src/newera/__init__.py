@@ -12,6 +12,8 @@ from .avatar import (AudioDelta, Availability, AvatarBusy, AvatarCall, AvatarErr
                      LiveKitRoom, LiveKitJoin, LiveKitDisconnected, ByoRefused, DEFAULT_TRANSPORT, TRANSPORTS)
 from .client import Newera
 from .speech import Audio
+from .stt import Done, Segment, StreamError, TranscribeStream, Transcription
+from . import stt
 from .h264 import DecodedFrame, H264Decoder
 from .player import LipSyncPlayer
 from .schema import function_schema, type_schema
@@ -26,11 +28,11 @@ def talk(**kwargs) -> int:
 
 __all__ = ["VoiceAgent", "Call", "Event", "Reply", "ToolSpec", "NeweraError", "DEFAULT_URL",
            "function_schema", "type_schema",
-           "Newera", "Audio", "talk", "AvatarCall", "AvatarReply", "Availability", "ClientSecret", "Timeline",
+           "Newera", "Audio", "Transcription", "TranscribeStream", "Segment", "Done", "StreamError", "stt", "talk", "AvatarCall", "AvatarReply", "Availability", "ClientSecret", "Timeline",
            "AvatarEvent", "AvatarReady", "VideoChunk", "Interrupted", "Unavailable", "AudioDelta", "UserTranscript",
            "ReplyTextDelta", "ReplyText", "SpeechStarted", "SpeechStopped", "ResponseDone", "SessionSummary",
            "ErrorEvent", "OtherEvent",
            "AvatarError", "InvalidRequest", "AuthenticationError", "InsufficientQuota", "NotEnabled",
            "CallTimeLimit", "RateLimited", "AvatarBusy", "AvatarUnavailable",
            "WrongMode", "WrongTransport", "TransportUnavailable", "LiveKitRoom", "LiveKitJoin", "LiveKitDisconnected", "ByoRefused", "DEFAULT_TRANSPORT", "TRANSPORTS", "LineError", "Line", "LineStarted", "LineDone", "LinePiece", "LipSyncPlayer", "H264Decoder", "DecodedFrame"]
-__version__ = "0.8.0"
+__version__ = "0.9.0"
