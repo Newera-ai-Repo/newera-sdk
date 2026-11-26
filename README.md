@@ -330,6 +330,17 @@ async with client.avatar.connect(mode="render-text", quality="balanced") as call
 call.on_line_piece(lambda p: print("%5d-%5d ms  %s" % (p.start_ms, p.end_ms, p.text)))
 ```
 
+* Word timings: shortly after each piece, while it plays, `LineWords(line_id, piece_index, words, approximate)` arrives in
+  `call.events()`, in `call.on_line_words(callback)` and in `line.words`. `words` is a list of `Word(word, start_ms, end_ms)`
+  on the same line clock as the pieces, so a caption can highlight each word as the clock reaches it. `approximate=True`
+  means the times are spread evenly over the piece instead of measured; the event is always sent. `word` is what you wrote
+  when the spoken form has the same number of words; a number read as several words (`25` -> `twenty five`) comes as the
+  spoken words. `connect(..., word_timings=False)` turns the event off.
+
+```python
+call.on_line_words(lambda ev: print(ev.piece_index, [(w.word, w.start_ms, w.end_ms) for w in ev.words], ev.approximate))
+```
+
 ### Video format and output
 
 Two options, both with defaults you rarely need to change. `video_format` is for `transport="websocket"` (the LiveKit
@@ -642,6 +653,7 @@ real avatar and is skipped unless `NEWERA_API_KEY` is set (use a key enabled for
 
 Full list: [CHANGELOG.md](CHANGELOG.md).
 
+* 0.10.0: word timings in render-text: `LineWords`, `Word`, `call.on_line_words`, `line.words`, `connect(word_timings=False)`. Additive.
 * 0.9.0: speech to text: `client.audio.transcribe(...)` for files and `client.audio.transcribe_stream(...)` for live audio
   (`Segment`, `Done`, `stt.SpeechStarted`, `stt.SpeechStopped`). Additive.
 * 0.7.0: join your own LiveKit room: `connect(..., livekit_room=LiveKitJoin(url, token, publish_on_behalf))`, `call.on_livekit_disconnected`,
