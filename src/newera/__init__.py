@@ -35,4 +35,4 @@ __all__ = ["VoiceAgent", "Call", "Event", "Reply", "ToolSpec", "NeweraError", "D
            "AvatarError", "InvalidRequest", "AuthenticationError", "InsufficientQuota", "NotEnabled",
            "CallTimeLimit", "RateLimited", "AvatarBusy", "AvatarUnavailable",
            "WrongMode", "WrongTransport", "TransportUnavailable", "LiveKitRoom", "LineWords", "Word", "LiveKitJoin", "LiveKitDisconnected", "ByoRefused", "DEFAULT_TRANSPORT", "TRANSPORTS", "LineError", "Line", "LineStarted", "LineDone", "LinePiece", "LipSyncPlayer", "H264Decoder", "DecodedFrame"]
-__version__ = "0.10.0"
+__version__ = "0.10.1"

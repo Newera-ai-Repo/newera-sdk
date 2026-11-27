@@ -507,6 +507,12 @@ def test_line_words_event_parses():
     assert isinstance(ev, LineWords)
     assert (ev.line_id, ev.piece_index, ev.approximate) == ("a", 1, True)
     assert ev.words == [Word("Hello", 1190.0, 1500.0), Word("there", 1500.0, 2190.0)]
+    assert [w.approximate for w in ev.words] == [False, False]          # a server that does not send it: False
+    per = parse_event({"type": "avatar.line.words", "line_id": "a", "approximate": True,
+                       "words": [{"word": "a", "start_ms": 0, "end_ms": 5, "approximate": False},
+                                 {"word": "b", "start_ms": 5, "end_ms": 9, "approximate": True}]})
+    assert [w.approximate for w in per.words] == [False, True] and per.approximate is True
+    assert Word().approximate is False
     bare = parse_event({"type": "avatar.line.words", "line_id": "a"})
     assert bare.words == [] and bare.approximate is False and bare.piece_index == 0
 
